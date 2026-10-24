@@ -1,0 +1,23 @@
+{
+  "name": "medicare-patient-portal",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "backend:dev": "npm --prefix backend run dev",
+    "backend:start": "npm --prefix backend run start",
+    "check:db": "npm --prefix backend run check:db"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "^0.468.0",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router-dom": "^7.18.4",
+    "recharts": "^2.15.0",
+    "vite": "latest"
+  }
+}
