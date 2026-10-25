@@ -2,9 +2,18 @@ import { randomUUID } from 'node:crypto';
 import { ObjectId } from 'mongodb';
 import neo4j from 'neo4j-driver';
 import { env } from '../config/env.js';
-import { getMongoDatabase } from '../config/mongodb.js';
+import { getMongoClient, getMongoDatabase } from '../config/mongodb.js';
 import { getNeo4jDriver } from '../config/neo4j.js';
-import { getZonedWeekdayAndTime, OperationError, pageOptions } from './adminOperations.service.js';
+import {
+  appointmentDuration,
+  appointmentMinuteReservations,
+  assertNoAppointmentOverlap,
+  fitsDoctorAvailability,
+  getZonedWeekdayAndTime,
+  OperationError,
+  pageOptions,
+  requireMinuteAlignedAppointmentTime,
+} from './adminOperations.service.js';
 
 const weekdays = new Set([0, 1, 2, 3, 4, 5, 6]);
 const recordTypes = new Set(['consultation', 'lab report', 'imaging', 'clinical note', 'other']);
@@ -55,7 +64,7 @@ export async function ensureDoctorIndexes() {
 }
 
 async function currentDoctor(actor) {
-  const doctor = await getMongoDatabase().collection('doctors').findOne({ userId: objectId(actor.id), isActive: { $ne: false } });
+  const doctor = await getMongoDatabase().collection('doctors').findOne({ userId: objectId(actor.id), isActive: true });
   if (!doctor) throw new OperationError(403, 'An active doctor profile is required.');
   return doctor;
 }
@@ -218,7 +227,7 @@ export async function changeDoctorAppointmentStatus(actor, id, status) {
     { $set: { status, updatedAt: new Date(), graphSync: { status: 'pending', updatedAt: new Date(), error: null } } },
   );
   if (!result.modifiedCount) throw new OperationError(409, 'The appointment changed. Refresh and try again.');
-  if (status === 'cancelled' || status === 'completed') await db.collection('appointment_slots').deleteOne({ appointmentId: appointment.appointmentId });
+  if (status === 'cancelled' || status === 'completed') await db.collection('appointment_slots').deleteMany({ appointmentId: appointment.appointmentId });
   const [patient, doctor] = await Promise.all([
     db.collection('patients').findOne({ userId: objectId(appointment.patientId, 'Patient ID') }),
     db.collection('doctors').findOne({ userId: objectId(actor.id) }),
@@ -279,39 +288,60 @@ export async function rescheduleDoctorAppointment(actor, id, input) {
   const appointments = db.collection('appointments');
   const appointment = await appointments.findOne({ _id, doctorId: actor.id, status: 'scheduled' });
   if (!appointment) throw new OperationError(404, 'A scheduled appointment assigned to this doctor was not found.');
-  const scheduledAt = dateValue(input.scheduledAt, 'Appointment time', true);
+  const scheduledAt = requireMinuteAlignedAppointmentTime(dateValue(input.scheduledAt, 'Appointment time', true));
   if (scheduledAt <= new Date()) throw new OperationError(400, 'Appointment time must be in the future.');
   if (scheduledAt.valueOf() === new Date(appointment.scheduledAt).valueOf()) throw new OperationError(400, 'Choose a different appointment time.');
-  const { day, time } = getZonedWeekdayAndTime(scheduledAt, doctor.availabilityTimeZone || 'UTC');
-  const rule = doctor.availability?.find((entry) => entry.enabled && entry.day === day);
-  if (Array.isArray(doctor.availability)) {
-    if (!rule || time < rule.start || time >= rule.end || (rule.breakStart && time >= rule.breakStart && time < rule.breakEnd)) {
-      throw new OperationError(409, 'The new time is outside your saved availability.');
-    }
+  if (!Array.isArray(doctor.availability) || doctor.availability.length === 0) {
+    throw new OperationError(409, 'Configure your weekly availability before rescheduling appointments.');
   }
-  const conflict = await appointments.findOne({ doctorId: actor.id, scheduledAt, status: 'scheduled', _id: { $ne: _id } }, { projection: { _id: 1 } });
-  if (conflict) throw new OperationError(409, 'Another appointment is already scheduled at that time.');
+  let durationMinutes = appointmentDuration(doctor, appointment);
+  if (!fitsDoctorAvailability(doctor.availability, doctor.availabilityTimeZone || 'UTC', scheduledAt, durationMinutes)) {
+    throw new OperationError(409, 'The new appointment time does not fit within your saved availability or break periods.');
+  }
   await db.collection('appointment_slots').createIndex({ doctorId: 1, scheduledAt: 1 }, { unique: true });
-  const slot = await db.collection('appointment_slots').insertOne({ doctorId: actor.id, scheduledAt, appointmentId: appointment.appointmentId, createdAt: new Date() }).catch((error) => {
-    if (error?.code === 11000) throw new OperationError(409, 'Another appointment is already scheduled at that time.');
-    throw error;
-  });
   const updatedAt = new Date();
+  const session = getMongoClient().startSession();
   try {
-    const result = await appointments.updateOne({ _id, doctorId: actor.id, status: 'scheduled', updatedAt: appointment.updatedAt }, {
-      $set: { scheduledAt, updatedAt, graphSync: { status: 'pending', updatedAt, error: null } },
+    await session.withTransaction(async () => {
+      const currentDoctorRecord = await db.collection('doctors').findOne({
+        userId: objectId(actor.id),
+        isActive: { $ne: false },
+      }, { session });
+      if (!currentDoctorRecord) throw new OperationError(403, 'An active doctor profile is required.');
+      if (!Array.isArray(currentDoctorRecord.availability) || currentDoctorRecord.availability.length === 0) {
+        throw new OperationError(409, 'Configure your weekly availability before rescheduling appointments.');
+      }
+      durationMinutes = appointmentDuration(currentDoctorRecord, appointment);
+      if (!fitsDoctorAvailability(currentDoctorRecord.availability, currentDoctorRecord.availabilityTimeZone || 'UTC', scheduledAt, durationMinutes)) {
+        throw new OperationError(409, 'The new appointment time does not fit within your saved availability or break periods.');
+      }
+      await assertNoAppointmentOverlap(db, actor.id, scheduledAt, durationMinutes, _id, session, currentDoctorRecord);
+      await db.collection('doctors').updateOne({ _id: currentDoctorRecord._id }, {
+        $inc: { appointmentScheduleRevision: 1 },
+      }, { session });
+      await db.collection('appointment_slots').deleteMany({ appointmentId: appointment.appointmentId }, { session });
+      await db.collection('appointment_slots').insertMany(
+        appointmentMinuteReservations(actor.id, scheduledAt, durationMinutes, appointment.appointmentId),
+        { session, ordered: true },
+      );
+      const result = await appointments.updateOne(
+        { _id, doctorId: actor.id, status: 'scheduled', updatedAt: appointment.updatedAt },
+        { $set: { scheduledAt, durationMinutes, updatedAt, graphSync: { status: 'pending', updatedAt, error: null } } },
+        { session },
+      );
+      if (!result.modifiedCount) throw new OperationError(409, 'The appointment changed. Refresh and try again.');
     });
-    if (!result.modifiedCount) throw new OperationError(409, 'The appointment changed. Refresh and try again.');
   } catch (error) {
-    await db.collection('appointment_slots').deleteOne({ _id: slot.insertedId });
+    if (error?.code === 11000) throw new OperationError(409, 'The new time overlaps another scheduled appointment.');
     throw error;
+  } finally {
+    await session.endSession();
   }
-  await db.collection('appointment_slots').deleteOne({ appointmentId: appointment.appointmentId, scheduledAt: appointment.scheduledAt });
   let graphSync = 'failed';
   const patient = await db.collection('patients').findOne({ userId: objectId(appointment.patientId, 'Patient ID') });
   if (patient) {
     try {
-      await syncDoctorAppointmentToGraph({ ...appointment, scheduledAt }, patient, doctor, 'scheduled');
+      await syncDoctorAppointmentToGraph({ ...appointment, scheduledAt, durationMinutes }, patient, doctor, 'scheduled');
       await appointments.updateOne({ _id }, { $set: { graphSync: { status: 'synced', updatedAt: new Date(), error: null } } });
       graphSync = 'synced';
     } catch {
@@ -320,7 +350,7 @@ export async function rescheduleDoctorAppointment(actor, id, input) {
     }
   }
   await db.collection('audit_logs').insertOne({ actorId: actor.id, actorName: actor.name, action: 'doctor.appointment.rescheduled', entity: 'appointment', entityId: appointment.appointmentId, metadata: { graphSync }, createdAt: new Date() });
-  return { id: id, scheduledAt, graphSync };
+  return { id, scheduledAt, durationMinutes, graphSync };
 }
 
 export async function listDoctorPatients(actor, query) {
@@ -491,7 +521,7 @@ export async function saveDoctorConsultation(actor, input) {
   if (status === 'finalized') {
     const patient = await db.collection('patients').findOne({ _id: consultation.patientId });
     await db.collection('appointments').updateOne({ _id: appointmentObjectId, doctorId: actor.id }, { $set: { status: 'completed', updatedAt: now, graphSync: { status: 'pending', updatedAt: now, error: null } } });
-    await db.collection('appointment_slots').deleteOne({ appointmentId: appointment.appointmentId });
+    await db.collection('appointment_slots').deleteMany({ appointmentId: appointment.appointmentId });
     try {
       if (!patient) throw new Error('Patient record unavailable.');
       await syncConsultationToGraph(appointment, patient, doctor);
@@ -622,15 +652,38 @@ export async function updateDoctorFollowUp(actor, id, input) {
 
 export async function getDoctorAvailability(actor) {
   const doctor = await currentDoctor(actor);
-  return { availability: doctor.availability || [], timeZone: doctor.availabilityTimeZone || 'UTC', configured: Array.isArray(doctor.availability) };
+  const db = getMongoDatabase();
+  const appointments = await db.collection('appointments')
+    .find({ doctorId: actor.id, status: 'scheduled', scheduledAt: { $gte: new Date() } })
+    .sort({ scheduledAt: 1 })
+    .limit(100)
+    .toArray();
+  const patientNames = await patientNamesForAppointments(appointments);
+  return {
+    availability: doctor.availability || [],
+    timeZone: doctor.availabilityTimeZone || 'UTC',
+    durationMinutes: doctor.availabilityDurationMinutes || 30,
+    updatedAt: doctor.availabilityUpdatedAt || null,
+    configured: Array.isArray(doctor.availability) && doctor.availability.length > 0,
+    upcomingAppointments: appointments.map((appointment) => ({
+      id: appointment._id.toString(),
+      appointmentId: appointment.appointmentId,
+      scheduledAt: appointment.scheduledAt,
+      durationMinutes: appointmentDuration(doctor, appointment),
+      reason: appointment.reason || '',
+      status: appointment.status,
+      patient: patientNames.get(appointment.patientId) || null,
+    })),
+  };
 }
 
-function parseAvailability(input) {
-  if (!Array.isArray(input) || input.length > 7) throw new OperationError(400, 'Availability must contain no more than seven weekly entries.');
+export function parseAvailability(input) {
+  if (!Array.isArray(input) || input.length !== 7) throw new OperationError(400, 'Availability must include an entry for each day of the week.');
   const seen = new Set();
   return input.map((entry) => {
-    const day = Number(entry.day);
-    if (!weekdays.has(day) || seen.has(day) || typeof entry.enabled !== 'boolean') throw new OperationError(400, 'Availability contains a duplicate or invalid weekday.');
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new OperationError(400, 'Availability contains an invalid weekday entry.');
+    const day = entry.day;
+    if (!Number.isInteger(day) || !weekdays.has(day) || seen.has(day) || typeof entry.enabled !== 'boolean') throw new OperationError(400, 'Availability contains a duplicate or invalid weekday.');
     seen.add(day);
     if (!entry.enabled) return { day, enabled: false };
     const start = cleanText(entry.start, 'Start time', { required: true, max: 5 });
@@ -648,28 +701,161 @@ function parseAvailability(input) {
   });
 }
 
+export function parseAppointmentDuration(value) {
+  const durationMinutes = Number(value);
+  if (!Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 120 || durationMinutes % 15 !== 0) {
+    throw new OperationError(400, 'Appointment duration must be a 15-minute increment between 15 and 120 minutes.');
+  }
+  return durationMinutes;
+}
+
 export async function updateDoctorAvailability(actor, input) {
   const doctor = await currentDoctor(actor);
   const availability = parseAvailability(input.availability);
-  const timeZone = cleanText(input.timeZone || doctor.availabilityTimeZone || 'UTC', 'Time zone', { required: true, max: 80 });
+  const timeZone = cleanText(input.timeZone === undefined ? (doctor.availabilityTimeZone || 'UTC') : input.timeZone, 'Time zone', { required: true, max: 80 });
+  const durationMinutes = parseAppointmentDuration(input.durationMinutes);
   try {
     new Intl.DateTimeFormat('en-US', { timeZone }).format(new Date());
   } catch {
     throw new OperationError(400, 'Enter a valid IANA time zone.');
   }
-  const scheduled = await getMongoDatabase().collection('appointments').find({ doctorId: actor.id, status: 'scheduled', scheduledAt: { $gte: new Date() } }).project({ appointmentId: 1, scheduledAt: 1 }).toArray();
-  const enabledDays = new Map(availability.filter((item) => item.enabled).map((item) => [item.day, item]));
-  const conflicts = scheduled.filter((appointment) => {
-    const date = new Date(appointment.scheduledAt);
-    const { day, time } = getZonedWeekdayAndTime(date, timeZone);
-    const rule = enabledDays.get(day);
-    if (!rule) return true;
-    return time < rule.start || time >= rule.end || (rule.breakStart && time >= rule.breakStart && time < rule.breakEnd);
+  const db = getMongoDatabase();
+  const updatedAt = new Date();
+  const session = getMongoClient().startSession();
+  try {
+    await session.withTransaction(async () => {
+      const currentDoctorRecord = await db.collection('doctors').findOne({
+        _id: doctor._id,
+        userId: objectId(actor.id),
+        isActive: { $ne: false },
+      }, { session });
+      if (!currentDoctorRecord) throw new OperationError(403, 'An active doctor profile is required.');
+      const scheduled = await db.collection('appointments')
+        .find({ doctorId: actor.id, status: 'scheduled', scheduledAt: { $gte: new Date() } }, { session })
+        .project({ appointmentId: 1, scheduledAt: 1, durationMinutes: 1 })
+        .toArray();
+      const conflicts = scheduled.filter((appointment) => !fitsDoctorAvailability(
+        availability,
+        timeZone,
+        appointment.scheduledAt,
+        appointmentDuration(currentDoctorRecord, appointment),
+      ));
+      if (conflicts.length) {
+        throw new OperationError(409, `Availability conflicts with ${conflicts.length} existing scheduled appointment(s). No appointments were changed.`);
+      }
+      await db.collection('doctors').updateOne({ _id: doctor._id }, {
+        $set: { availability, availabilityTimeZone: timeZone, availabilityDurationMinutes: durationMinutes, availabilityUpdatedAt: updatedAt, updatedAt },
+        $inc: { appointmentScheduleRevision: 1 },
+      }, { session });
+    });
+  } finally {
+    await session.endSession();
+  }
+  await db.collection('audit_logs').insertOne({
+    actorId: actor.id,
+    actorName: actor.name,
+    action: 'doctor.availability.updated',
+    entity: 'doctor',
+    entityId: doctor._id.toString(),
+    metadata: { durationMinutes, timeZone },
+    createdAt: updatedAt,
   });
-  if (conflicts.length) throw new OperationError(409, `Availability conflicts with ${conflicts.length} existing scheduled appointment(s). No appointments were changed.`);
-  await getMongoDatabase().collection('doctors').updateOne({ _id: doctor._id }, { $set: { availability, availabilityTimeZone: timeZone, updatedAt: new Date() } });
-  await getMongoDatabase().collection('audit_logs').insertOne({ actorId: actor.id, actorName: actor.name, action: 'doctor.availability.updated', entity: 'doctor', entityId: doctor._id.toString(), createdAt: new Date() });
-  return { availability, timeZone };
+  return { availability, timeZone, durationMinutes, updatedAt, configured: true };
+}
+
+function localTimeToUtc(dateText, time, timeZone) {
+  const [year, month, day] = dateText.split('-').map(Number);
+  const [hours, minutes] = time.split(':').map(Number);
+  const desired = Date.UTC(year, month - 1, day, hours, minutes);
+  let value = desired;
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    const parts = Object.fromEntries(formatter.formatToParts(new Date(value)).map((part) => [part.type, part.value]));
+    const represented = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
+    const difference = desired - represented;
+    value += difference;
+    if (difference === 0) break;
+  }
+  const resolved = new Date(value);
+  const { day: resolvedDay, time: resolvedTime } = getZonedWeekdayAndTime(resolved, timeZone);
+  const resolvedParts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(resolved).map((part) => [part.type, part.value]));
+  const resolvedDate = `${resolvedParts.year}-${resolvedParts.month}-${resolvedParts.day}`;
+  if (resolvedDate !== dateText || resolvedTime !== time || resolvedDay < 0) {
+    throw new OperationError(400, 'The requested local time does not exist in the doctor’s time zone.');
+  }
+  return resolved;
+}
+
+export async function getAvailableSlotsForDoctor(doctorId, dateText) {
+  const db = getMongoDatabase();
+  const doctor = await db.collection('doctors').findOne({
+    userId: objectId(doctorId, 'Doctor ID'),
+    isActive: true,
+  });
+  if (!doctor) throw new OperationError(404, 'An active doctor profile was not found.');
+  const user = await db.collection('users').findOne({
+    _id: objectId(doctorId, 'Doctor ID'),
+    role: 'doctor',
+    isActive: true,
+  }, { projection: { _id: 1 } });
+  if (!user) throw new OperationError(404, 'An active doctor account was not found.');
+  if (typeof dateText !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateText)) {
+    throw new OperationError(400, 'Date must use YYYY-MM-DD format.');
+  }
+  const calendarDate = new Date(`${dateText}T00:00:00.000Z`);
+  if (Number.isNaN(calendarDate.valueOf()) || calendarDate.toISOString().slice(0, 10) !== dateText) {
+    throw new OperationError(400, 'Date is invalid.');
+  }
+  const timeZone = doctor.availabilityTimeZone || 'UTC';
+  const durationMinutes = appointmentDuration(doctor);
+  if (!Array.isArray(doctor.availability) || doctor.availability.length === 0) {
+    return { date: dateText, timeZone, durationMinutes, configured: false, slots: [] };
+  }
+  const noon = localTimeToUtc(dateText, '12:00', timeZone);
+  const day = getZonedWeekdayAndTime(noon, timeZone).day;
+  const rule = doctor.availability.find((entry) => entry.enabled && entry.day === day);
+  if (!rule) return { date: dateText, timeZone, durationMinutes, configured: true, slots: [] };
+  const workStart = localTimeToUtc(dateText, rule.start, timeZone);
+  const workEnd = localTimeToUtc(dateText, rule.end, timeZone);
+  const appointments = await db.collection('appointments')
+    .find({
+      doctorId: doctorId,
+      status: 'scheduled',
+      scheduledAt: { $gte: new Date(workStart.valueOf() - 120 * 60000), $lt: workEnd },
+    })
+    .toArray();
+  const occupied = appointments.map((appointment) => ({
+    start: appointment.scheduledAt,
+    end: new Date(appointment.scheduledAt.valueOf() + appointmentDuration(doctor, appointment) * 60000),
+  }));
+  const slots = [];
+  const now = new Date();
+  for (let start = workStart; start.valueOf() + durationMinutes * 60000 <= workEnd.valueOf(); start = new Date(start.valueOf() + durationMinutes * 60000)) {
+    const end = new Date(start.valueOf() + durationMinutes * 60000);
+    if (start <= now) continue;
+    if (!fitsDoctorAvailability(doctor.availability, timeZone, start, durationMinutes)) continue;
+    if (occupied.some((appointment) => appointment.start < end && appointment.end > start)) continue;
+    slots.push({ startAt: start, endAt: end, time: getZonedWeekdayAndTime(start, timeZone).time });
+  }
+  return { date: dateText, timeZone, durationMinutes, configured: true, slots };
+}
+
+export async function getDoctorAvailabilitySlots(actor, dateText) {
+  await currentDoctor(actor);
+  return getAvailableSlotsForDoctor(actor.id, dateText);
 }
 
 export async function getDoctorProfile(actor) {

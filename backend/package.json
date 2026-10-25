@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "test": "node --test",
     "check:db": "node scripts/check-databases.js",
     "init:mongodb": "node scripts/init-mongodb.js",
     "init:neo4j": "node scripts/init-neo4j.js",

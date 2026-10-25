@@ -74,7 +74,8 @@ router.get('/patients/:id', asyncRoute(async (req, res) => {
   const db = getMongoDatabase();
   const patient = await db.collection('patients').findOne({ $or: [{ _id: id }, { userId: id }] }, { projection: { medicalHistory: 0, records: 0 } });
   if (!patient) throw new OperationError(404, 'Patient was not found.');
-  const user = patient.userId ? await db.collection('users').findOne({ _id: patient.userId }, { projection: { isActive: 1 } }) : null;
+  const user = patient.userId ? await db.collection('users').findOne({ _id: patient.userId, role: 'patient' }, { projection: { isActive: 1 } }) : null;
+  if (!user) throw new OperationError(404, 'A patient account linked to this profile was not found.');
   const appointments = await db.collection('appointments').find({ patientId: patient.userId?.toString() || id.toString() }).sort({ scheduledAt: -1 }).limit(50).project({ appointmentId: 1, scheduledAt: 1, status: 1, reason: 1, doctorId: 1 }).toArray();
   res.json({ patient: { ...patient, id: patient._id.toString(), userId: patient.userId?.toString(), isActive: user?.isActive !== false && patient.isActive !== false }, appointments: appointments.map((item) => ({ ...item, id: item._id.toString() })) });
 }));
@@ -84,6 +85,9 @@ router.patch('/patients/:id', asyncRoute(async (req, res) => {
   const db = getMongoDatabase();
   const patient = await db.collection('patients').findOne({ $or: [{ _id: id }, { userId: id }] });
   if (!patient) throw new OperationError(404, 'Patient was not found.');
+  if (!patient.userId || !await db.collection('users').findOne({ _id: patient.userId, role: 'patient' }, { projection: { _id: 1 } })) {
+    throw new OperationError(404, 'A patient account linked to this profile was not found.');
+  }
   const changes = {};
   if (req.body?.name !== undefined) changes.name = patientProfileInput({ ...patient, ...req.body }, false).name || patient.name;
   if (req.body?.phone !== undefined) changes.phone = patientProfileInput({ ...patient, ...req.body }, false).phone;
@@ -133,6 +137,9 @@ router.patch('/doctors/:id', asyncRoute(async (req, res) => {
   const db = getMongoDatabase();
   const doctor = await db.collection('doctors').findOne({ $or: [{ _id: id }, { userId: id }] });
   if (!doctor) throw new OperationError(404, 'Doctor was not found.');
+  if (!doctor.userId || !await db.collection('users').findOne({ _id: doctor.userId, role: 'doctor' }, { projection: { _id: 1 } })) {
+    throw new OperationError(404, 'A doctor account linked to this profile was not found.');
+  }
   const changes = {};
   for (const key of ['name', 'email', 'phone', 'specialization', 'department']) {
     if (req.body?.[key] !== undefined) changes[key] = req.body[key];
@@ -290,7 +297,10 @@ router.patch('/settings', asyncRoute(async (req, res) => {
 
 router.get('/departments', asyncRoute(async (req, res) => {
   const result = await getMongoDatabase().collection('doctors').aggregate([
-    { $match: { isActive: { $ne: false }, department: { $type: 'string', $ne: '' } } },
+    { $match: { isActive: true, department: { $type: 'string', $ne: '' } } },
+    { $lookup: { from: 'users', localField: 'userId', foreignField: '_id', as: 'account' } },
+    { $unwind: '$account' },
+    { $match: { 'account.role': 'doctor', 'account.isActive': true } },
     { $group: { _id: '$department', doctors: { $sum: 1 } } },
     { $sort: { _id: 1 } },
   ]).toArray();

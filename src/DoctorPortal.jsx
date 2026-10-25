@@ -21,6 +21,12 @@ const doctorNavigation = [
 const calendarStartHour = 0;
 const calendarEndHour = 24;
 const defaultAppointmentDurationMinutes = 30;
+const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const weekdays = [1, 2, 3, 4, 5, 6, 0];
+
+function blankAvailability() {
+  return weekdays.map((day) => ({ day, enabled: false, start: '', end: '', breakStart: '', breakEnd: '' }));
+}
 
 function startOfDay(value) {
   const date = new Date(value);
@@ -146,6 +152,22 @@ function displayTime(value) {
   return Number.isNaN(date.valueOf()) ? '—' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function displayDateInTimeZone(value, timeZone) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? '—' : date.toLocaleString([], { timeZone, dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function dateKeyInTimeZone(value, timeZone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(value)).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
 function Badge({ value }) {
   const status = String(value || 'unknown').toLowerCase();
   return <span className={`doctor-badge ${status}`}>{String(value || 'Unknown').replaceAll('_', ' ')}</span>;
@@ -238,6 +260,17 @@ function DoctorLayout({ user, onLogout }) {
       setError(logoutError.message);
     }
   }
+  function keepDoctorNavigationInTab(event) {
+    const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null;
+    if (!anchor || anchor.hasAttribute('download')) return;
+
+    const destination = new URL(anchor.href, window.location.href);
+    if (destination.origin !== window.location.origin
+      || (destination.pathname !== '/doctor' && !destination.pathname.startsWith('/doctor/'))) return;
+
+    event.preventDefault();
+    navigate(`${destination.pathname}${destination.search}${destination.hash}`);
+  }
   const message = (result, fallback) => {
     if (result?.graphSync === 'failed') {
       setError(`${fallback} The MongoDB change was saved, but graph synchronization failed; contact your administrator for reconciliation.`);
@@ -248,7 +281,7 @@ function DoctorLayout({ user, onLogout }) {
     setError('');
   };
   const actions = { message, clearNotice: () => setNotice(''), setError };
-  return <div className="doctor-app">
+  return <div className="doctor-app" onClickCapture={keepDoctorNavigationInTab}>
     <aside className={`doctor-sidebar ${menuOpen ? 'open' : ''}`}>
       <Link to="/doctor/dashboard" className="doctor-brand"><span><HeartPulse size={20}/></span><b>medicare<em>.</em><small>DOCTOR WORKSPACE</small></b></Link>
       <div className="doctor-account"><span><Stethoscope size={17}/></span><div><strong>{user.name}</strong><small>Clinical team</small></div><ShieldCheck size={15}/></div>
@@ -286,12 +319,16 @@ export default function DoctorPortal({ user, onLogout }) {
 }
 
 function AppointmentCalendar({ compact = false, message }) {
-  const [date, setDate] = useState(() => new Date());
+  const [searchParams] = useSearchParams();
+  const [date, setDate] = useState(() => {
+    const requestedDate = searchParams.get('date');
+    const parsedDate = requestedDate ? new Date(`${requestedDate}T00:00:00`) : new Date();
+    return Number.isNaN(parsedDate.valueOf()) ? new Date() : parsedDate;
+  });
   const [view, setView] = useState(compact ? 'week' : 'month');
   const [presentation, setPresentation] = useState('calendar');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('all');
-  const [searchParams] = useSearchParams();
   const [selectedId, setSelectedId] = useState(() => searchParams.get('appointment') || '');
   const [rescheduleAt, setRescheduleAt] = useState('');
   const [saving, setSaving] = useState(false);
@@ -720,25 +757,133 @@ function DoctorFollowUps({ message, setError }) {
 
 function DoctorAvailability({ message, setError }) {
   const { data, loading, error, reload } = useResource('/doctor/availability');
-  const [days, setDays] = useState([]);
-  const [timeZone, setTimeZone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  const [days, setDays] = useState(blankAvailability);
+  const [timeZone, setTimeZone] = useState('UTC');
+  const [durationMinutes, setDurationMinutes] = useState(30);
+  const [savedDraft, setSavedDraft] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [availabilityDate, setAvailabilityDate] = useState(() => localDateKey(new Date()));
+  const [slotResult, setSlotResult] = useState(null);
+  const [slotLoading, setSlotLoading] = useState(false);
+  const [slotError, setSlotError] = useState('');
   useEffect(() => {
     if (!data) return;
     setTimeZone(data.timeZone || 'UTC');
     const saved = new Map((data.availability || []).map((entry) => [entry.day, entry]));
-    setDays(weekdays.map((name, day) => saved.get(day) || { day, enabled: false, start: '09:00', end: '17:00', breakStart: '', breakEnd: '' }));
+    const nextDays = weekdays.map((day) => saved.has(day)
+      ? { breakStart: '', breakEnd: '', ...saved.get(day) }
+      : { day, enabled: false, start: '', end: '', breakStart: '', breakEnd: '' });
+    const nextDraft = {
+      days: nextDays,
+      timeZone: data.timeZone || 'UTC',
+      durationMinutes: data.durationMinutes || 30,
+    };
+    setDays(nextDays);
+    setDurationMinutes(nextDraft.durationMinutes);
+    setSavedDraft(nextDraft);
+    setAvailabilityDate(dateKeyInTimeZone(new Date(), nextDraft.timeZone));
   }, [data]);
+  const currentDraft = { days, timeZone, durationMinutes };
+  const hasUnsavedChanges = Boolean(savedDraft) && JSON.stringify(currentDraft) !== JSON.stringify(savedDraft);
+  const slotsPath = `/doctor/availability/slots?date=${encodeURIComponent(availabilityDate)}`;
+  const loadSlots = useCallback(async (signal) => {
+    if (!data?.configured || !availabilityDate) {
+      setSlotResult(null);
+      setSlotError('');
+      setSlotLoading(false);
+      return;
+    }
+    setSlotLoading(true);
+    setSlotError('');
+    try {
+      setSlotResult(await requestApi(slotsPath, { signal }));
+    } catch (loadError) {
+      if (loadError.name !== 'AbortError') setSlotError(loadError.message);
+    } finally {
+      if (!signal?.aborted) setSlotLoading(false);
+    }
+  }, [availabilityDate, data?.configured, slotsPath]);
+  useEffect(() => {
+    const controller = new AbortController();
+    loadSlots(controller.signal);
+    return () => controller.abort();
+  }, [loadSlots]);
   function update(day, changes) { setDays((previous) => previous.map((entry) => entry.day === day ? { ...entry, ...changes } : entry)); }
+  function discardChanges() {
+    if (!hasUnsavedChanges || !window.confirm('Discard your unsaved availability changes?')) return;
+    setDays(savedDraft.days.map((entry) => ({ ...entry })));
+    setTimeZone(savedDraft.timeZone);
+    setDurationMinutes(savedDraft.durationMinutes);
+    setError('');
+  }
   async function save(event) {
-    event.preventDefault(); setSaving(true);
-    try { await requestApi('/doctor/availability', { method: 'PATCH', body: { availability: days, timeZone } }); message({}, 'Weekly availability saved. Existing appointments were not changed.'); await reload(); }
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    try {
+      await requestApi('/doctor/availability', { method: 'PATCH', body: { availability: days, timeZone, durationMinutes } });
+      message({}, 'Weekly availability saved. Existing appointments were not changed.');
+      await reload();
+    }
     catch (saveError) { setError(saveError.message); }
     finally { setSaving(false); }
   }
   if (loading) return <LoadingState/>;
   if (error) return <><PageHeading title="My availability" subtitle="Configure your weekly appointment hours."/><ErrorState message={error} retry={() => reload()}/></>;
-  return <><PageHeading title="My availability" subtitle={`Appointment times are checked in ${timeZone}.`}/>{!data.configured && <div className="doctor-message"><Clock3 size={15}/>No weekly schedule is configured yet. Until you save one, existing booking behavior remains unchanged.</div>}<form className="doctor-panel doctor-availability" onSubmit={save}><div className="doctor-availability-heading"><div><span className="doctor-eyebrow">WEEKLY HOURS</span><h2>Working days and breaks</h2></div><span>Changes never cancel booked appointments.</span></div><label className="doctor-time-zone">Time zone (IANA)<input required maxLength="80" value={timeZone} onChange={(event) => setTimeZone(event.target.value)} placeholder="e.g. Asia/Kolkata"/></label>{days.map((entry) => <div className={`doctor-day-row ${entry.enabled ? '' : 'disabled'}`} key={entry.day}><label className="doctor-day-toggle"><input type="checkbox" checked={entry.enabled} onChange={(event) => update(entry.day, { enabled: event.target.checked })}/><strong>{weekdays[entry.day]}</strong></label><label>Start<input type="time" disabled={!entry.enabled} value={entry.start || ''} onChange={(event) => update(entry.day, { start: event.target.value })}/></label><label>End<input type="time" disabled={!entry.enabled} value={entry.end || ''} onChange={(event) => update(entry.day, { end: event.target.value })}/></label><label>Break starts<input type="time" disabled={!entry.enabled} value={entry.breakStart || ''} onChange={(event) => update(entry.day, { breakStart: event.target.value })}/></label><label>Break ends<input type="time" disabled={!entry.enabled} value={entry.breakEnd || ''} onChange={(event) => update(entry.day, { breakEnd: event.target.value })}/></label></div>)}<div className="doctor-form-actions"><button className="doctor-button primary" disabled={saving}>{saving ? 'Saving…' : 'Save availability'} <Check size={15}/></button></div></form></>;
+  return <>
+    <PageHeading title="My availability" subtitle={data.configured ? `Appointment times are checked in ${timeZone}.` : 'Set your weekly hours and time zone before appointments can be booked.'}/>
+    {!data.configured && <div className="doctor-message"><Clock3 size={15}/>No schedule is saved yet. New appointments cannot be booked until you save your working hours.</div>}
+    <form className="doctor-panel doctor-availability" onSubmit={save}>
+      <div className="doctor-availability-heading">
+        <div><span className="doctor-eyebrow">WEEKLY HOURS</span><h2>Working days and breaks</h2>{data.updatedAt && <small className="doctor-availability-updated">Saved {displayDate(data.updatedAt)}</small>}</div>
+        <span>Schedule changes never cancel appointments. Changes that conflict with booked visits are rejected.</span>
+      </div>
+      <div className="doctor-availability-settings">
+        <label className="doctor-time-zone">Time zone (IANA)
+          <input required maxLength="80" value={timeZone} onChange={(event) => setTimeZone(event.target.value)} placeholder="e.g. Asia/Kolkata"/>
+        </label>
+        <label>Appointment duration
+          <select required value={durationMinutes} onChange={(event) => setDurationMinutes(Number(event.target.value))}>
+            {[15, 30, 45, 60, 75, 90, 105, 120].map((minutes) => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
+          </select>
+        </label>
+      </div>
+      {days.map((entry) => <div className={`doctor-day-row ${entry.enabled ? '' : 'disabled'}`} key={entry.day}>
+        <label className="doctor-day-toggle"><input type="checkbox" checked={entry.enabled} onChange={(event) => update(entry.day, { enabled: event.target.checked })}/><strong>{weekdayNames[entry.day]}</strong><span>{entry.enabled ? 'Working' : 'Unavailable'}</span></label>
+        <label>Start<input type="time" required={entry.enabled} disabled={!entry.enabled} value={entry.start || ''} onChange={(event) => update(entry.day, { start: event.target.value })}/></label>
+        <label>End<input type="time" required={entry.enabled} disabled={!entry.enabled} value={entry.end || ''} onChange={(event) => update(entry.day, { end: event.target.value })}/></label>
+        <label>Break starts<input type="time" disabled={!entry.enabled} value={entry.breakStart || ''} onChange={(event) => update(entry.day, { breakStart: event.target.value })}/></label>
+        <label>Break ends<input type="time" disabled={!entry.enabled} value={entry.breakEnd || ''} onChange={(event) => update(entry.day, { breakEnd: event.target.value })}/></label>
+      </div>)}
+      <div className="doctor-form-actions">
+        {hasUnsavedChanges && <button className="doctor-button outline" type="button" disabled={saving} onClick={discardChanges}>Discard unsaved changes</button>}
+        <button className="doctor-button primary" disabled={saving || !hasUnsavedChanges}>{saving ? 'Saving…' : 'Save availability'} <Check size={15}/></button>
+      </div>
+    </form>
+    <section className="doctor-panel doctor-availability-results">
+      <div className="doctor-panel-heading"><div><span className="doctor-eyebrow">SCHEDULED VISITS</span><h2>Upcoming appointments</h2></div><button className="doctor-calendar-icon-button" type="button" onClick={() => reload()} aria-label="Refresh upcoming appointments"><RefreshCw size={14}/></button></div>
+      {data.upcomingAppointments?.length
+        ? <div className="doctor-availability-appointments">{data.upcomingAppointments.map((appointment) => {
+          const date = localDateKey(appointment.scheduledAt);
+          return <article key={appointment.id}>
+            <div><strong>{appointment.patient?.name || 'Patient name unavailable'}</strong><small>{appointment.appointmentId} · {appointment.reason || 'Reason not recorded'}</small></div>
+            <span>{displayDateInTimeZone(appointment.scheduledAt, timeZone)} · {appointment.durationMinutes} min</span>
+            <Badge value={appointment.status}/>
+            <Link className="doctor-text-link" to={`/doctor/appointments?appointment=${encodeURIComponent(appointment.id)}&date=${encodeURIComponent(date)}`}>Inspect appointment</Link>
+          </article>;
+        })}</div> : <p className="doctor-muted">No upcoming scheduled appointments were found.</p>}
+    </section>
+    <section className="doctor-panel doctor-availability-results">
+      <div className="doctor-panel-heading"><div><span className="doctor-eyebrow">OPEN APPOINTMENT TIMES</span><h2>Available slots</h2></div></div>
+      <label className="doctor-slot-date">Date in {timeZone}<input type="date" required value={availabilityDate} onChange={(event) => setAvailabilityDate(event.target.value)}/></label>
+      {!data.configured ? <p className="doctor-muted">Save a schedule to calculate appointment slots.</p>
+        : !availabilityDate ? <p className="doctor-muted">Choose a date to calculate available appointment slots.</p>
+        : slotLoading ? <LoadingState label="Calculating available slots…"/>
+          : slotError ? <ErrorState message={slotError} retry={() => loadSlots()}/>
+            : slotResult?.slots?.length ? <div className="doctor-availability-slots">{slotResult.slots.map((slot) => <span key={slot.startAt}>{slot.time}</span>)}</div>
+              : <p className="doctor-muted">No available appointment slots were found for this date.</p>}
+    </section>
+  </>;
 }
 
 function DoctorProfile({ message, setError }) {

@@ -6,6 +6,7 @@ import { env } from './config/env.js';
 import authRoutes from './routes/auth.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import doctorRoutes from './routes/doctor.routes.js';
+import patientRoutes from './routes/patient.routes.js';
 import healthRoutes from './routes/health.routes.js';
 import notFound from './middleware/notFound.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -53,6 +54,7 @@ app.use('/api', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/doctor', doctorRoutes);
+app.use('/api/patient', patientRoutes);
 app.use(notFound);
 app.use(errorHandler);
 

@@ -7,6 +7,7 @@ import {
   createDoctorRecord,
   getDoctorAppointment,
   getDoctorAvailability,
+  getDoctorAvailabilitySlots,
   getDoctorDashboard,
   getDoctorPatient,
   getDoctorProfile,
@@ -57,6 +58,7 @@ router.post('/medical-records', endpoint(async (req, res) => res.status(201).jso
 router.patch('/medical-records/:id', endpoint(async (req, res) => res.json(await saveDoctorRecord(req.user, req.body || {}, req.params.id))));
 router.get('/follow-ups', endpoint(async (req, res) => res.json(await listDoctorFollowUps(req.user, req.query))));
 router.patch('/follow-ups/:id', endpoint(async (req, res) => res.json(await updateDoctorFollowUp(req.user, req.params.id, req.body || {}))));
+router.get('/availability/slots', endpoint(async (req, res) => res.json(await getDoctorAvailabilitySlots(req.user, req.query.date))));
 router.get('/availability', endpoint(async (req, res) => res.json(await getDoctorAvailability(req.user))));
 router.patch('/availability', endpoint(async (req, res) => res.json(await updateDoctorAvailability(req.user, req.body || {}))));
 router.get('/profile', endpoint(async (req, res) => res.json(await getDoctorProfile(req.user))));

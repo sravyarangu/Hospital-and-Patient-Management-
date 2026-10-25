@@ -38,6 +38,7 @@ async function seedDemoUsers() {
           name: demoUser.name,
           email: demoUser.email,
           role: demoUser.role,
+          isActive: true,
           passwordHash,
           createdAt: now,
           updatedAt: now,
@@ -54,13 +55,13 @@ async function seedDemoUsers() {
     if (demoUser.role === 'patient') {
       await db.collection('patients').updateOne(
         { userId: account._id },
-        { $setOnInsert: { userId: account._id, name: account.name, email: account.email, createdAt: now, updatedAt: now } },
+        { $setOnInsert: { userId: account._id, name: account.name, email: account.email, isActive: true, createdAt: now, updatedAt: now } },
         { upsert: true },
       );
     } else if (demoUser.role === 'doctor') {
       await db.collection('doctors').updateOne(
         { userId: account._id },
-        { $setOnInsert: { userId: account._id, name: account.name, email: account.email, createdAt: now, updatedAt: now } },
+        { $setOnInsert: { userId: account._id, name: account.name, email: account.email, isActive: true, createdAt: now, updatedAt: now } },
         { upsert: true },
       );
     }

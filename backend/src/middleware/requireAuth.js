@@ -25,10 +25,10 @@ export default async function requireAuth(req, res, next) {
 
     const user = await getMongoDatabase().collection('users').findOne(
       { _id: new ObjectId(payload.sub) },
-      { projection: { name: 1, email: 1, role: 1 } },
+      { projection: { name: 1, email: 1, role: 1, isActive: 1 } },
     );
 
-    if (!user || !allowedRoles.has(user.role)) {
+    if (!user || user.isActive === false || !allowedRoles.has(user.role)) {
       res.status(401).json({ error: true, message: 'Your session is no longer valid.' });
       return;
     }

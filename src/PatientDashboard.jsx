@@ -1,45 +1,70 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { getBackendHealth } from './api';
+import React, { useEffect, useMemo, useState } from 'react';
+import { getBackendHealth, requestApi } from './api';
 import {
-  Activity, ArrowDownRight, ArrowRight, ArrowUpRight, Bell, CalendarDays,
-  Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Download,
-  FileHeart, FileText, Heart, HeartPulse, LayoutDashboard, LogOut, Menu,
-  MessageCircle, MoreHorizontal, Plus, Search, Settings, ShieldCheck, Sparkles,
-  Stethoscope, UserRound, UsersRound, X, Droplets, Thermometer, Wind, Pill,
-  Video, MapPin, Star, CalendarCheck, ClipboardList, BadgeCheck, Footprints,
-  Brain, Eye, ChevronUp, CheckCircle2, AlertCircle
+  Activity, ArrowRight, ArrowUpRight, Bell, CalendarDays, Check, ChevronDown,
+  ChevronRight, CircleHelp, Clock3, FileHeart, FileText, HeartPulse,
+  LayoutDashboard, LogOut, Menu, MessageCircle, MoreHorizontal, Plus, Search,
+  Settings, ShieldCheck, Sparkles, Stethoscope, UserRound, X, Droplets, Pill,
+  MapPin, CalendarCheck, ClipboardList, BadgeCheck, CheckCircle2, AlertCircle
 } from 'lucide-react';
-import {
-  Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
-  Bar, BarChart, Cell
-} from 'recharts';
 
-const initialAppointments = [
-  { id: 'APT-1048', doctor: 'Dr. Olivia Bennett', specialty: 'Cardiologist', date: '2026-10-28', time: '10:30 AM', type: 'In-person', status: 'Confirmed', initials: 'OB', color: 'lilac' },
-  { id: 'APT-1039', doctor: 'Dr. Ethan Carter', specialty: 'General Physician', date: '2026-11-03', time: '02:00 PM', type: 'Video consultation', status: 'Pending', initials: 'EC', color: 'peach' },
-];
-const doctors = [
-  { id: 'D-101', name: 'Dr. Olivia Bennett', specialty: 'Cardiologist', experience: '12 years experience', rating: '4.9', fee: '₹800', initials: 'OB', color: 'lilac', available: 'Today, 10:30 AM' },
-  { id: 'D-102', name: 'Dr. Ethan Carter', specialty: 'General Physician', experience: '9 years experience', rating: '4.8', fee: '₹500', initials: 'EC', color: 'peach', available: 'Tomorrow, 11:00 AM' },
-  { id: 'D-103', name: 'Dr. Sophia Williams', specialty: 'Dermatologist', experience: '8 years experience', rating: '4.9', fee: '₹700', initials: 'SW', color: 'mint', available: 'Thu, 09:30 AM' },
-  { id: 'D-104', name: 'Dr. Noah Mitchell', specialty: 'Neurologist', experience: '15 years experience', rating: '4.7', fee: '₹1,000', initials: 'NM', color: 'blue', available: 'Fri, 12:00 PM' },
-];
-const records = [
-  { id: 'MR-2026-108', title: 'Cardiology Consultation', doctor: 'Dr. Olivia Bennett', date: 'Oct 18, 2026', category: 'Consultation', icon: HeartPulse, tint: 'pink', description: 'Routine cardiovascular assessment and follow-up.' },
-  { id: 'MR-2026-096', title: 'Complete Blood Count', doctor: 'CityCare Diagnostics', date: 'Oct 10, 2026', category: 'Lab report', icon: Droplets, tint: 'blue', description: 'Blood test results and laboratory observations.' },
-  { id: 'MR-2026-083', title: 'Annual Health Check-up', doctor: 'Dr. Ethan Carter', date: 'Sep 22, 2026', category: 'Health check', icon: ClipboardList, tint: 'green', description: 'Annual preventive health screening summary.' },
-  { id: 'MR-2026-071', title: 'Prescription — Vitamin D', doctor: 'Dr. Ethan Carter', date: 'Sep 22, 2026', category: 'Prescription', icon: Pill, tint: 'orange', description: 'Medication instructions provided during consultation.' },
-];
-const activityData = [
-  { day: 'Mon', steps: 4200, goal: 7000 }, { day: 'Tue', steps: 6100, goal: 7000 },
-  { day: 'Wed', steps: 5200, goal: 7000 }, { day: 'Thu', steps: 7800, goal: 7000 },
-  { day: 'Fri', steps: 6800, goal: 7000 }, { day: 'Sat', steps: 8900, goal: 7000 },
-  { day: 'Sun', steps: 6400, goal: 7000 },
-];
-const heartData = [
-  { day: 'Mon', value: 71 }, { day: 'Tue', value: 74 }, { day: 'Wed', value: 69 },
-  { day: 'Thu', value: 72 }, { day: 'Fri', value: 68 }, { day: 'Sat', value: 73 }, { day: 'Sun', value: 70 },
-];
+const doctorColors = ['lilac', 'peach', 'mint', 'blue'];
+const recordPresentation = {
+  consultation: { icon: HeartPulse, tint: 'pink' },
+  lab: { icon: Droplets, tint: 'blue' },
+  prescription: { icon: Pill, tint: 'orange' },
+  imaging: { icon: ClipboardList, tint: 'green' },
+};
+
+function initials(name = '') {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || 'DR';
+}
+
+function formatDateKey(value, timeZone) {
+  const date = new Date(value);
+  if (timeZone) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  }
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function formatRecord(record) {
+  const type = String(record.recordType || 'record').toLowerCase();
+  const presentation = recordPresentation[type] || { icon: FileText, tint: 'blue' };
+  return {
+    ...record,
+    category: type.charAt(0).toUpperCase() + type.slice(1),
+    doctor: record.provider || 'Care team',
+    date: record.createdAt ? new Date(record.createdAt).toLocaleDateString() : 'Date unavailable',
+    icon: presentation.icon,
+    tint: presentation.tint,
+    description: record.content || 'No details were added to this record.',
+  };
+}
+
+function formatAppointment(appointment, index) {
+  const scheduledAt = new Date(appointment.scheduledAt);
+  const status = appointment.status || 'scheduled';
+  const timeZone = appointment.timeZone || 'UTC';
+  return {
+    ...appointment,
+    date: formatDateKey(scheduledAt, timeZone),
+    time: scheduledAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone }),
+    doctor: appointment.doctorName ? `Dr. ${appointment.doctorName.replace(/^Dr\.\s*/i, '')}` : 'Doctor',
+    specialty: appointment.specialization || appointment.department || 'Appointment',
+    type: appointment.reason || 'Appointment',
+    status: status.charAt(0).toUpperCase() + status.slice(1),
+    initials: initials(appointment.doctorName),
+    color: doctorColors[index % doctorColors.length],
+  };
+}
 
 function Avatar({ initials = 'AR', color = 'blue', size = 'md' }) {
   return <div className={`avatar ${color} ${size}`}>{initials}</div>;
@@ -48,9 +73,6 @@ function SectionHeading({ title, subtitle, action, onAction }) {
   return <div className="section-heading"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{action && <button className="text-button" onClick={onAction}>{action}<ArrowRight size={15}/></button>}</div>;
 }
 function Badge({ children, tone = 'neutral' }) { return <span className={`badge ${tone}`}><span className="badge-dot"/>{children}</span>; }
-function StatCard({ label, value, unit, change, icon: Icon, color, note }) {
-  return <div className="stat-card"><div className="stat-top"><div className={`stat-icon ${color}`}><Icon size={19}/></div><button className="icon-button tiny" aria-label={`More about ${label}`}><MoreHorizontal size={18}/></button></div><div className="stat-value-row"><strong>{value}</strong>{unit && <span>{unit}</span>}</div><div className="stat-label">{label}</div><div className="stat-foot"><span className="change-pill"><ArrowUpRight size={13}/>{change}</span><span>{note}</span></div></div>;
-}
 function Modal({ title, onClose, children, wide = false }) {
   return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}><div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true"><div className="modal-head"><div><h2>{title}</h2><p>Enter the details below to continue.</p></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={19}/></button></div>{children}</div></div>;
 }
@@ -60,41 +82,32 @@ export function PatientDashboard({ user, onLogout }) {
   const [mobileNav, setMobileNav] = useState(false);
   const [search, setSearch] = useState('');
   const [showBooking, setShowBooking] = useState(false);
-  const [showAllRecords, setShowAllRecords] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
-  const [appointmentsList, setAppointmentsList] = useState(initialAppointments);
+  const [appointmentsList, setAppointmentsList] = useState([]);
+  const [appointmentsTotal, setAppointmentsTotal] = useState(0);
+  const [appointmentStatusCounts, setAppointmentStatusCounts] = useState({ scheduled: 0, completed: 0, cancelled: 0 });
+  const [doctors, setDoctors] = useState([]);
+  const [doctorsTotal, setDoctorsTotal] = useState(0);
+  const [records, setRecords] = useState([]);
+  const [recordsTotal, setRecordsTotal] = useState(0);
+  const [portalLoading, setPortalLoading] = useState(true);
+  const [portalError, setPortalError] = useState('');
+  const [doctorsLoading, setDoctorsLoading] = useState(true);
+  const [doctorsError, setDoctorsError] = useState('');
+  const [doctorRequestVersion, setDoctorRequestVersion] = useState(0);
+  const [bookingSaving, setBookingSaving] = useState(false);
+  const [bookingSlots, setBookingSlots] = useState([]);
+  const [slotTimeZone, setSlotTimeZone] = useState('UTC');
+  const [slotsLoading, setSlotsLoading] = useState(false);
+  const [slotsError, setSlotsError] = useState('');
   const [recordFilter, setRecordFilter] = useState('All records');
   const [doctorFilter, setDoctorFilter] = useState('All specialties');
-  const [profile, setProfile] = useState(() => ({ name: user?.name || 'Ananya Rao', email: user?.email || 'ananya.rao@email.com', phone: '+91 98765 43210', dob: '2001-06-14', blood: 'O+', emergency: 'R. Rao · +91 98765 40000' }));
-  const [booking, setBooking] = useState({ doctor: 'Dr. Olivia Bennett', date: '2026-10-28', time: '10:30', type: 'In-person', reason: 'Routine check-up' });
+  const [profile, setProfile] = useState(() => ({ name: user?.name || '', email: user?.email || '', phone: '', dob: '', blood: '', emergency: '' }));
+  const [booking, setBooking] = useState({ doctorId: '', date: formatDateKey(Date.now() + 86400000), startAt: '', reason: '' });
   const [toast, setToast] = useState('');
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [selectedDoctor, setSelectedDoctor] = useState(null);
   const [profileEditing, setProfileEditing] = useState(false);
-  const [sensorStatus, setSensorStatus] = useState('not-connected');
-  const [sensorSteps, setSensorSteps] = useState(0);
-  const [sensorMessage, setSensorMessage] = useState('Connect your phone to estimate steps while this page is open.');
-  const lastStepAt = useRef(0);
-  const lastMagnitude = useRef(0);
-  const sensorListener = useRef(null);
-  useEffect(() => () => { if (sensorListener.current) window.removeEventListener('devicemotion', sensorListener.current); }, []);
-  const connectPhoneMotion = async () => {
-    if (!('DeviceMotionEvent' in window)) { setSensorStatus('unsupported'); setSensorMessage('This browser/device does not expose motion sensors. Try a compatible mobile browser or enter steps manually.'); return; }
-    try {
-      if (typeof DeviceMotionEvent.requestPermission === 'function') { const permission = await DeviceMotionEvent.requestPermission(); if (permission !== 'granted') { setSensorStatus('denied'); setSensorMessage('Motion permission was not granted. You can still enter a step count manually.'); return; } }
-      if (sensorListener.current) window.removeEventListener('devicemotion', sensorListener.current);
-      sensorListener.current = (event) => {
-        const a = event.accelerationIncludingGravity; if (!a || a.x == null || a.y == null || a.z == null) return;
-        const magnitude = Math.sqrt(a.x*a.x + a.y*a.y + a.z*a.z); const now = Date.now();
-        if (magnitude > 12.2 && lastMagnitude.current <= 12.2 && now - lastStepAt.current > 350) { setSensorSteps(v => v + 1); lastStepAt.current = now; }
-        lastMagnitude.current = magnitude;
-      };
-      window.addEventListener('devicemotion', sensorListener.current); setSensorStatus('connected'); setSensorMessage('Motion sensor active while this page stays open. Step estimates may be inaccurate; this is a prototype, not a medical-grade counter.');
-    } catch { setSensorStatus('error'); setSensorMessage('Could not access motion sensors. Check browser permissions and try again.'); }
-  };
-  const disconnectPhoneMotion = () => { if (sensorListener.current) window.removeEventListener('devicemotion', sensorListener.current); sensorListener.current = null; setSensorStatus('not-connected'); setSensorMessage('Sensor disconnected. Connect again whenever you want to estimate steps.'); };
-  const [manualSteps, setManualSteps] = useState('');
-  const [todaySteps, setTodaySteps] = useState(6842);
   const [profileDraft, setProfileDraft] = useState(profile);
   const [backendHealth, setBackendHealth] = useState({ status: 'checking', message: 'Checking backend connection...' });
 
@@ -112,6 +125,103 @@ export function PatientDashboard({ user, onLogout }) {
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.allSettled([
+      requestApi('/patient/profile', { signal: controller.signal }),
+      requestApi('/patient/appointments?limit=100', { signal: controller.signal }),
+      requestApi('/patient/records?limit=100', { signal: controller.signal }),
+    ]).then(([profileResult, appointmentResult, recordsResult]) => {
+      const errors = [];
+      if (profileResult.status === 'fulfilled') {
+        const patient = profileResult.value.profile;
+        setProfile({
+          name: patient.name || '',
+          email: patient.email || '',
+          phone: patient.phone || '',
+          dob: patient.dateOfBirth || '',
+          blood: patient.bloodGroup || '',
+          emergency: patient.emergencyContact || '',
+        });
+      } else errors.push(profileResult.reason?.message || 'Profile could not be loaded.');
+      if (appointmentResult.status === 'fulfilled') {
+        setAppointmentsList(appointmentResult.value.items.map(formatAppointment));
+        setAppointmentsTotal(appointmentResult.value.total || 0);
+        setAppointmentStatusCounts(appointmentResult.value.statusCounts || { scheduled: 0, completed: 0, cancelled: 0 });
+      } else errors.push(appointmentResult.reason?.message || 'Appointments could not be loaded.');
+      if (recordsResult.status === 'fulfilled') {
+        setRecords(recordsResult.value.items.map(formatRecord));
+        setRecordsTotal(recordsResult.value.total || 0);
+      } else errors.push(recordsResult.reason?.message || 'Medical records could not be loaded.');
+      setPortalError(errors.join(' '));
+    }).finally(() => {
+      if (!controller.signal.aborted) setPortalLoading(false);
+    });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setDoctorsLoading(true);
+    setDoctorsError('');
+    requestApi('/patient/doctors?limit=100', { signal: controller.signal })
+      .then((response) => {
+        if (!Array.isArray(response.items)) throw new Error('Doctor directory response is invalid.');
+        setDoctors(response.items.map((doctor, index) => ({
+          ...doctor,
+          name: doctor.name ? `Dr. ${doctor.name.replace(/^Dr\.\s*/i, '')}` : 'Doctor',
+          specialty: doctor.specialization || doctor.department || 'General care',
+          initials: initials(doctor.name),
+          color: doctorColors[index % doctorColors.length],
+          experience: doctor.qualifications || 'Specialist',
+        })));
+        setDoctorsTotal(Number.isFinite(response.total) ? response.total : response.items.length);
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setDoctors([]);
+          setDoctorsTotal(0);
+          setDoctorsError(error.message || 'Could not load active doctor profiles.');
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDoctorsLoading(false);
+      });
+    return () => controller.abort();
+  }, [doctorRequestVersion]);
+
+  useEffect(() => setProfileDraft(profile), [profile]);
+
+  useEffect(() => {
+    if (showBooking && !booking.doctorId && doctors.length) {
+      setBooking((current) => ({ ...current, doctorId: doctors[0].id }));
+    }
+  }, [showBooking, booking.doctorId, doctors]);
+
+  useEffect(() => {
+    if (!showBooking || !booking.doctorId || !booking.date) {
+      setBookingSlots([]);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setSlotsLoading(true);
+    setSlotsError('');
+    requestApi(`/patient/doctors/${encodeURIComponent(booking.doctorId)}/slots?date=${encodeURIComponent(booking.date)}`, { signal: controller.signal })
+      .then((response) => {
+        setBookingSlots(response.slots || []);
+        setSlotTimeZone(response.timeZone || 'UTC');
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setBookingSlots([]);
+          setSlotsError(error.message || 'Could not load available appointment times.');
+        }
+      }).finally(() => {
+        if (!controller.signal.aborted) setSlotsLoading(false);
+      });
+    return () => controller.abort();
+  }, [showBooking, booking.doctorId, booking.date]);
+
   const nav = [
     { label: 'OVERVIEW', items: [{ name: 'Dashboard', icon: LayoutDashboard }, { name: 'Find a doctor', icon: Stethoscope }, { name: 'Appointments', icon: CalendarDays }] },
     { label: 'MY HEALTH', items: [{ name: 'Medical records', icon: FileHeart }, { name: 'Health insights', icon: Activity }] },
@@ -119,10 +229,10 @@ export function PatientDashboard({ user, onLogout }) {
   ];
   const notify = (message) => { setToast(message); window.setTimeout(() => setToast(''), 3000); };
   const go = (next) => { setPage(next); setMobileNav(false); setSearch(''); };
-  const filteredDoctors = useMemo(() => doctors.filter(d => (doctorFilter === 'All specialties' || d.specialty === doctorFilter) && `${d.name} ${d.specialty}`.toLowerCase().includes(search.toLowerCase())), [doctorFilter, search]);
-  const filteredRecords = useMemo(() => records.filter(r => (recordFilter === 'All records' || r.category === recordFilter) && `${r.title} ${r.doctor}`.toLowerCase().includes(search.toLowerCase())), [recordFilter, search]);
+  const filteredDoctors = useMemo(() => doctors.filter(d => (doctorFilter === 'All specialties' || d.specialty === doctorFilter) && `${d.name} ${d.specialty}`.toLowerCase().includes(search.toLowerCase())), [doctors, doctorFilter, search]);
+  const filteredRecords = useMemo(() => records.filter(r => (recordFilter === 'All records' || r.category === recordFilter) && `${r.title} ${r.doctor}`.toLowerCase().includes(search.toLowerCase())), [records, recordFilter, search]);
   const pageMeta = {
-    'Dashboard': [`Good morning, ${profile.name.split(' ')[0]}`, 'Here’s your health at a glance. Small steps today make a healthier tomorrow.'],
+    'Dashboard': [`Good morning, ${profile.name.split(' ')[0] || 'there'}`, 'Your appointments, active doctors, and saved records at a glance.'],
     'Find a doctor': ['Find your doctor', 'Care that fits your needs, from specialists you can trust.'],
     'Appointments': ['My appointments', 'Keep your care on track. Manage upcoming visits and review past appointments.'],
     'Medical records': ['My medical records', 'Your health history, organized and easy to access.'],
@@ -130,70 +240,150 @@ export function PatientDashboard({ user, onLogout }) {
     'My profile': ['My profile', 'Keep your personal information current and your care team informed.'],
     'Help & support': ['How can we help?', 'Find answers and get help with your patient portal.'],
   };
-  const addBooking = (e) => {
+  const addBooking = async (e) => {
     e.preventDefault();
-    const doctor = doctors.find(d => d.name === booking.doctor) || doctors[0];
-    const formattedTime = booking.time ? new Date(`2026-01-01T${booking.time}:00`).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '10:30 AM';
-    setAppointmentsList(prev => [{ id: `APT-${Math.floor(1000 + Math.random() * 8999)}`, doctor: doctor.name, specialty: doctor.specialty, date: booking.date, time: formattedTime, type: booking.type, status: 'Pending', initials: doctor.initials, color: doctor.color }, ...prev]);
-    setShowBooking(false); go('Appointments'); notify('Appointment request created successfully.');
+    if (!booking.startAt) return;
+    setBookingSaving(true);
+    try {
+      const result = await requestApi('/patient/appointments', {
+        method: 'POST',
+        body: { doctorId: booking.doctorId, scheduledAt: booking.startAt, reason: booking.reason },
+      });
+      const response = await requestApi('/patient/appointments?limit=100');
+      setAppointmentsList(response.items.map(formatAppointment));
+      setAppointmentsTotal(response.total || 0);
+      setAppointmentStatusCounts(response.statusCounts || { scheduled: 0, completed: 0, cancelled: 0 });
+      setShowBooking(false);
+      setBooking({ doctorId: '', date: formatDateKey(Date.now() + 86400000), startAt: '', reason: '' });
+      go('Appointments');
+      notify(result.message || 'Appointment request saved.');
+    } catch (error) {
+      notify(error.message || 'Could not save the appointment.');
+    } finally {
+      setBookingSaving(false);
+    }
   };
-  const cancelAppointment = (id) => { setAppointmentsList(prev => prev.map(a => a.id === id ? { ...a, status: 'Cancelled' } : a)); notify('Appointment cancelled.'); };
+  const cancelAppointment = async (id) => {
+    try {
+      const result = await requestApi(`/patient/appointments/${encodeURIComponent(id)}/cancel`, { method: 'PATCH' });
+      const response = await requestApi('/patient/appointments?limit=100');
+      setAppointmentsList(response.items.map(formatAppointment));
+      setAppointmentsTotal(response.total || 0);
+      setAppointmentStatusCounts(response.statusCounts || { scheduled: 0, completed: 0, cancelled: 0 });
+      notify(result.message || 'Appointment cancelled.');
+    } catch (error) {
+      notify(error.message || 'Could not cancel this appointment.');
+    }
+  };
+
+  const saveProfile = async (event) => {
+    event.preventDefault();
+    try {
+      const response = await requestApi('/patient/profile', {
+        method: 'PATCH',
+        body: {
+          name: profileDraft.name,
+          email: profileDraft.email,
+          phone: profileDraft.phone,
+          dateOfBirth: profileDraft.dob,
+          bloodGroup: profileDraft.blood,
+          emergencyContact: profileDraft.emergency,
+        },
+      });
+      const patient = response.profile;
+      setProfile({
+        name: patient.name || '',
+        email: patient.email || '',
+        phone: patient.phone || '',
+        dob: patient.dateOfBirth || '',
+        blood: patient.bloodGroup || '',
+        emergency: patient.emergencyContact || '',
+      });
+      setProfileEditing(false);
+      notify('Profile updated.');
+    } catch (error) {
+      notify(error.message || 'Could not update your profile.');
+    }
+  };
 
   const Sidebar = () => <aside className={`sidebar ${mobileNav ? 'mobile-open' : ''}`}>
     <div className="brand"><div className="brand-mark"><HeartPulse size={22}/></div><div className="brand-copy"><strong>medicare<span>.</span></strong><small>YOUR HEALTH SPACE</small></div><button className="icon-button sidebar-close" onClick={() => setMobileNav(false)}><X size={19}/></button></div>
-    <div className="sidebar-patient"><Avatar initials={profile.name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase()} color="blue"/><div><strong>{profile.name}</strong><span>Patient account</span></div><Badge tone="green">Active</Badge></div>
+    <div className="sidebar-patient"><Avatar initials={initials(profile.name)} color="blue"/><div><strong>{profile.name || 'Patient'}</strong><span>Patient account</span></div><Badge tone="green">Active</Badge></div>
     <nav className="side-nav">{nav.map(group => <div className="nav-group" key={group.label}><span className="nav-label">{group.label}</span>{group.items.map(item => <button key={item.name} className={`nav-item ${page === item.name ? 'active' : ''}`} onClick={() => go(item.name)}><item.icon size={18}/><span>{item.name}</span>{item.name === 'Appointments' && <span className="nav-count">{appointmentsList.filter(a => a.status !== 'Cancelled').length}</span>}{page === item.name && <span className="active-rail"/>}</button>)}</div>)}</nav>
-    <div className="sidebar-bottom"><div className="care-card"><div className="care-card-icon"><Sparkles size={16}/></div><strong>Your health, your way.</strong><p>Stay on top of your wellness journey with personalized insights.</p><button onClick={() => go('Health insights')}>Explore insights <ArrowRight size={14}/></button><div className="care-orb orb-one"/><div className="care-orb orb-two"/></div><button className="nav-item" onClick={() => notify('Account settings are not available yet.')}><Settings size={18}/><span>Settings</span></button><button className="nav-item" onClick={onLogout}><LogOut size={18}/><span>Sign out</span></button><div className="sidebar-footer">© 2026 MediCare <span>•</span> Made for your wellbeing</div></div>
+    <div className="sidebar-bottom"><div className="care-card"><div className="care-card-icon"><Sparkles size={16}/></div><strong>Your health, your way.</strong><p>Wellness insights appear when readings are linked to your account.</p><button onClick={() => go('Health insights')}>Explore insights <ArrowRight size={14}/></button><div className="care-orb orb-one"/><div className="care-orb orb-two"/></div><button className="nav-item" onClick={() => notify('Account settings are not available yet.')}><Settings size={18}/><span>Settings</span></button><button className="nav-item" onClick={onLogout}><LogOut size={18}/><span>Sign out</span></button><div className="sidebar-footer">© 2026 MediCare <span>•</span> Made for your wellbeing</div></div>
   </aside>;
 
-  const Header = () => <header className="topbar"><div className="topbar-left"><button className="icon-button menu-toggle" onClick={() => setMobileNav(true)} aria-label="Open menu"><Menu size={20}/></button><div className="breadcrumb"><span>Patient portal</span><ChevronRight size={14}/><strong>{page}</strong></div></div><div className="topbar-right"><span className={`backend-pill ${backendHealth.status}`} title={backendHealth.message}>{backendHealth.status === 'ok' ? 'Backend online' : backendHealth.status === 'offline' ? 'Backend offline' : 'Checking backend...'}</span><label className="global-search"><Search size={17}/><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search anything..."/><kbd>⌘ K</kbd></label><div className="notification-wrap"><button className={`icon-button notification-button ${showNotifications ? 'pressed' : ''}`} onClick={() => setShowNotifications(!showNotifications)} aria-label="Notifications"><Bell size={19}/><i/></button>{showNotifications && <div className="notification-popover"><div className="popover-title"><strong>Notifications</strong><span>2 new</span></div><div className="notice-item"><span className="notice-icon teal"><CalendarCheck size={17}/></span><div><strong>Appointment reminder</strong><p>Dr. Olivia Bennett · Oct 28 at 10:30 AM</p><small>12 minutes ago</small></div></div><div className="notice-item"><span className="notice-icon violet"><FileText size={17}/></span><div><strong>New health record available</strong><p>Your blood test summary is ready to view.</p><small>Yesterday</small></div></div><button className="popover-link" onClick={() => { setShowNotifications(false); go('Medical records'); }}>View medical records <ArrowRight size={14}/></button></div>}</div><div className="topbar-divider"/><button className="top-profile" onClick={() => go('My profile')}><Avatar initials={profile.name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase()} color="blue" size="sm"/><span><strong>{profile.name}</strong><small>Patient</small></span><ChevronDown size={15}/></button></div></header>;
+  const Header = () => <header className="topbar">
+    <div className="topbar-left"><button className="icon-button menu-toggle" onClick={() => setMobileNav(true)} aria-label="Open menu"><Menu size={20}/></button><div className="breadcrumb"><span>Patient portal</span><ChevronRight size={14}/><strong>{page}</strong></div></div>
+    <div className="topbar-right">
+      <span className={`backend-pill ${backendHealth.status}`} title={backendHealth.message}>{backendHealth.status === 'ok' ? 'Backend online' : backendHealth.status === 'offline' ? 'Backend offline' : 'Checking backend...'}</span>
+      <label className="global-search"><Search size={17}/><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search anything..."/><kbd>⌘ K</kbd></label>
+      <div className="notification-wrap"><button className={`icon-button notification-button ${showNotifications ? 'pressed' : ''}`} onClick={() => setShowNotifications(!showNotifications)} aria-label="Notifications"><Bell size={19}/></button>{showNotifications && <div className="notification-popover"><div className="popover-title"><strong>Notifications</strong></div><div className="empty-state"><Bell size={24}/><strong>No notifications</strong><span>There are no saved notifications for your account.</span></div></div>}</div>
+      <div className="topbar-divider"/><button className="top-profile" onClick={() => go('My profile')}><Avatar initials={initials(profile.name)} color="blue" size="sm"/><span><strong>{profile.name || 'Patient'}</strong><small>Patient</small></span><ChevronDown size={15}/></button>
+    </div>
+  </header>;
 
-  const AppointmentCard = ({ appointment, compact = false }) => <div className={`appointment-card ${compact ? 'compact' : ''}`}><div className={`date-tile ${appointment.status === 'Cancelled' ? 'cancelled' : ''}`}><span>{new Date(`${appointment.date}T12:00:00`).toLocaleDateString('en-US', { month: 'short' }).toUpperCase()}</span><strong>{new Date(`${appointment.date}T12:00:00`).getDate()}</strong><small>{new Date(`${appointment.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short' })}</small></div><Avatar initials={appointment.initials} color={appointment.color}/><div className="appointment-info"><strong>{appointment.doctor}</strong><span>{appointment.specialty}</span><div className="appointment-meta"><span><Clock3 size={13}/>{appointment.time}</span><span>{appointment.type === 'Video consultation' ? <Video size={13}/> : <MapPin size={13}/>} {appointment.type}</span></div></div><div className="appointment-actions"><Badge tone={appointment.status === 'Confirmed' ? 'green' : appointment.status === 'Cancelled' ? 'red' : 'amber'}>{appointment.status}</Badge>{!compact && <button className="icon-button tiny" onClick={() => notify(`Appointment ${appointment.id}: ${appointment.status}`)} aria-label="Appointment options"><MoreHorizontal size={18}/></button>}</div></div>;
+  const AppointmentCard = ({ appointment, compact = false }) => <div className={`appointment-card ${compact ? 'compact' : ''}`}>
+    <div className={`date-tile ${appointment.status === 'Cancelled' ? 'cancelled' : ''}`}><span>{new Date(`${appointment.date}T12:00:00`).toLocaleDateString('en-US', { month: 'short' }).toUpperCase()}</span><strong>{new Date(`${appointment.date}T12:00:00`).getDate()}</strong><small>{new Date(`${appointment.date}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short' })}</small></div>
+    <Avatar initials={appointment.initials} color={appointment.color}/>
+    <div className="appointment-info"><strong>{appointment.doctor}</strong><span>{appointment.specialty}</span><div className="appointment-meta"><span><Clock3 size={13}/>{appointment.time}</span><span><MapPin size={13}/>{appointment.type}</span></div></div>
+    <div className="appointment-actions"><Badge tone={appointment.status === 'Scheduled' ? 'green' : appointment.status === 'Cancelled' ? 'red' : 'neutral'}>{appointment.status}</Badge>{!compact && <button className="icon-button tiny" onClick={() => notify(`Appointment ${appointment.appointmentId || appointment.id}: ${appointment.status}`)} aria-label="Appointment details"><MoreHorizontal size={18}/></button>}</div>
+  </div>;
 
   const Dashboard = () => <div className="journal-dashboard">
     <section className="journal-intro">
-      <div className="journal-kicker"><span className="journal-kicker-dot"/> YOUR HEALTH JOURNAL <span className="journal-date">{new Date().toLocaleDateString('en-IN',{weekday:'long',month:'short',day:'numeric'})}</span></div>
-      <h2>A little better,<br/><em>every day.</em></h2>
-      <p>Hi {profile.name.split(' ')[0]}, your health journey is made of small moments. Here is your personal snapshot.</p>
+      <div className="journal-kicker"><span className="journal-kicker-dot"/> YOUR HEALTH JOURNAL <span className="journal-date">{new Date().toLocaleDateString('en-IN', { weekday: 'long', month: 'short', day: 'numeric' })}</span></div>
+      <h2>Your care,<br/><em>in one place.</em></h2>
+      <p>{profile.name ? `Welcome, ${profile.name.split(' ')[0]}.` : 'Welcome to your patient portal.'} This dashboard shows information saved to your account.</p>
       <div className="journal-actions"><button className="btn btn-primary" onClick={() => setShowBooking(true)}><Plus size={16}/> Plan a care visit</button><button className="journal-link" onClick={() => go('Medical records')}>Explore my records <ArrowRight size={15}/></button></div>
       <div className="journal-orbit orbit-one"/><div className="journal-orbit orbit-two"/><div className="journal-flower">✳</div>
     </section>
-    <section className="movement-feature">
-      <div className="movement-main">
-        <div className="journal-section-label"><Footprints size={15}/> TODAY IN MOTION <span className="source-tag">{sensorStatus === 'connected' ? 'PHONE SENSOR' : 'DEMO DATA'}</span></div>
-        <div className="movement-number">{(sensorStatus === 'connected' ? sensorSteps : todaySteps).toLocaleString()} <span>steps</span></div>
-        <p className="movement-caption">A walk is a small promise you keep to yourself.</p>
-        <div className="movement-progress"><span style={{width:`${Math.min(100,((sensorStatus === 'connected' ? sensorSteps : todaySteps)/8000)*100)}%`}}/></div>
-        <div className="movement-foot"><span>{Math.round(Math.min(100,((sensorStatus === 'connected' ? sensorSteps : todaySteps)/8000)*100))}% of your 8,000-step goal</span><span>{Math.max(0,8000-(sensorStatus === 'connected' ? sensorSteps : todaySteps)).toLocaleString()} to go</span></div>
-        <div className="sensor-controls"><button className="sensor-button" onClick={sensorStatus === 'connected' ? disconnectPhoneMotion : connectPhoneMotion}>{sensorStatus === 'connected' ? <CheckCircle2 size={16}/> : <Activity size={16}/>} {sensorStatus === 'connected' ? 'Disconnect phone sensor' : 'Connect phone sensor'}</button><label className="manual-step-form"><span>or enter steps</span><input aria-label="Manual step count" type="number" min="0" max="100000" value={manualSteps} onChange={e=>setManualSteps(e.target.value)} placeholder="e.g. 4200"/><button onClick={()=>{if(manualSteps!=='' && Number(manualSteps)>=0){setTodaySteps(Number(manualSteps));setSensorSteps(0);setManualSteps('');setSensorStatus('not-connected');setSensorMessage('Step count entered manually. It is not a sensor measurement.');if(sensorListener.current)disconnectPhoneMotion();notify('Step count updated for this demo.');}}}>Save</button></label></div>
-        <p className="sensor-note"><Activity size={13}/>{sensorMessage}</p>
-      </div>
-      <div className="movement-ring-wrap"><div className="movement-ring" style={{'--progress':`${Math.min(100,((sensorStatus === 'connected' ? sensorSteps : todaySteps)/8000)*100)}%`}}><div><Footprints size={22}/><strong>{Math.round(Math.min(100,((sensorStatus === 'connected' ? sensorSteps : todaySteps)/8000)*100))}%</strong><small>OF DAILY GOAL</small></div></div><span className="ring-caption">Every step counts.</span><div className="ring-spark">✦</div></div>
-    </section>
+    {portalError && <div className="info-banner"><span className="info-banner-icon"><AlertCircle size={19}/></span><div><strong>Patient data could not be loaded</strong><p>{portalError}</p></div><button className="text-button" onClick={() => window.location.reload()}>Retry</button></div>}
     <section className="journal-metrics" aria-label="Health snapshot">
-      <div className="journal-metric heart-metric"><span className="metric-label"><HeartPulse size={15}/> RESTING HEART RATE</span><div><strong>72</strong><span>bpm</span><i className="pulse-wave">〰〰〰</i></div><small>Sample reading · not live</small></div>
-      <div className="journal-metric"><span className="metric-label"><Activity size={15}/> BLOOD PRESSURE</span><div><strong>118/78</strong><span>mmHg</span></div><small>Sample record · Oct 18</small></div>
-      <div className="journal-metric"><span className="metric-label"><Clock3 size={15}/> SLEEP AVERAGE</span><div><strong>7.6</strong><span>hours</span></div><small>Sample history · last 7 days</small></div>
+      <div className="journal-metric heart-metric"><span className="metric-label"><HeartPulse size={15}/> MEDICAL RECORDS</span><div><strong>{portalLoading ? '—' : recordsTotal}</strong><span>saved</span></div><small>Records linked to your account</small></div>
+      <div className="journal-metric"><span className="metric-label"><CalendarDays size={15}/> APPOINTMENTS</span><div><strong>{portalLoading ? '—' : appointmentsTotal}</strong><span>saved</span></div><small>Appointments linked to your account</small></div>
+      <div className="journal-metric"><span className="metric-label"><Stethoscope size={15}/> ACTIVE DOCTORS</span><div><strong>{portalLoading ? '—' : doctorsTotal}</strong><span>available</span></div><small>Verified active doctor accounts</small></div>
     </section>
     <section className="journal-lower-grid">
-      <div className="journal-activity"><div className="journal-block-head"><div><span className="journal-section-label">THE RHYTHM OF YOUR WEEK</span><h3>Movement, in moments.</h3></div><button className="journal-link" onClick={()=>go('Health insights')}>Full insights <ArrowRight size={14}/></button></div><div className="journal-chart-summary"><strong>{(sensorStatus === 'connected' ? sensorSteps : todaySteps).toLocaleString()}</strong><span>steps today</span><Badge tone="neutral">Illustrative weekly history</Badge></div><div className="journal-chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={activityData} margin={{top:12,right:8,left:-22,bottom:0}}><defs><linearGradient id="journalStepsFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4f8967" stopOpacity={0.28}/><stop offset="100%" stopColor="#4f8967" stopOpacity={0.01}/></linearGradient></defs><CartesianGrid strokeDasharray="2 7" vertical={false} stroke="#e3e8de"/><XAxis dataKey="day" axisLine={false} tickLine={false} tick={{fill:'#798475',fontSize:11}}/><YAxis hide domain={[0,10000]}/><Tooltip contentStyle={{border:'1px solid #e1e7dc',borderRadius:12,fontSize:12}} formatter={v=>[`${v.toLocaleString()} steps`,'Recorded activity']}/><Area type="monotone" dataKey="steps" stroke="#4f8967" strokeWidth={3} fill="url(#journalStepsFill)" activeDot={{r:5,strokeWidth:0}}/></AreaChart></ResponsiveContainer></div><p className="journal-chart-note">Past days are illustrative demo data. Connect a supported health-data source for real history.</p></div>
-      <div className="care-timeline"><span className="journal-section-label"><CalendarDays size={15}/> YOUR CARE JOURNEY</span><h3>Coming up.</h3>{appointmentsList.filter(a=>a.status!=='Cancelled').slice(0,2).map((a,i)=><div className="timeline-item" key={a.id}><div className="timeline-date"><span>{new Date(a.date+'T12:00:00').toLocaleDateString('en-US',{month:'short'}).toUpperCase()}</span><strong>{new Date(a.date+'T12:00:00').getDate()}</strong></div><div className="timeline-copy"><strong>{a.specialty} visit</strong><span>{a.doctor}</span><small><Clock3 size={12}/> {a.time}</small><Badge tone={a.status==='Confirmed'?'green':'amber'}>{a.status}</Badge></div></div>)}<button className="timeline-book" onClick={()=>setShowBooking(true)}>Plan another visit <ArrowRight size={15}/></button></div>
+      <div className="journal-activity"><div className="journal-block-head"><div><span className="journal-section-label">YOUR SAVED HEALTH DATA</span><h3>Wellness readings</h3></div><button className="journal-link" onClick={() => go('Health insights')}>Health insights <ArrowRight size={14}/></button></div><div className="empty-state"><Activity size={28}/><strong>No wellness readings saved</strong><span>Health metrics will appear here when they are recorded in your account.</span></div></div>
+      <div className="care-timeline"><span className="journal-section-label"><CalendarDays size={15}/> YOUR CARE JOURNEY</span><h3>Appointments.</h3>{appointmentsList.filter((appointment) => appointment.status === 'Scheduled' && new Date(`${appointment.date}T23:59:00`) >= new Date()).slice(0, 2).map((appointment) => <div className="timeline-item" key={appointment.id}><div className="timeline-date"><span>{new Date(`${appointment.date}T12:00:00`).toLocaleDateString('en-US', { month: 'short' }).toUpperCase()}</span><strong>{new Date(`${appointment.date}T12:00:00`).getDate()}</strong></div><div className="timeline-copy"><strong>{appointment.specialty}</strong><span>{appointment.doctor}</span><small><Clock3 size={12}/> {appointment.time}</small><Badge tone="green">{appointment.status}</Badge></div></div>)}{!portalLoading && appointmentStatusCounts.scheduled === 0 && <p>No upcoming appointments are saved yet.</p>}<button className="timeline-book" onClick={() => setShowBooking(true)}>Plan a visit <ArrowRight size={15}/></button></div>
     </section>
-    <section className="journal-record-strip"><div className="record-strip-intro"><span className="journal-section-label"><FileHeart size={15}/> KEEP CLOSE</span><h3>Your latest care notes.</h3><button className="journal-link" onClick={()=>go('Medical records')}>All records <ArrowRight size={14}/></button></div>{records.slice(0,2).map(r=><button className="journal-record" key={r.id} onClick={()=>setSelectedRecord(r)}><span className={`record-icon ${r.tint}`}><r.icon size={18}/></span><span><strong>{r.title}</strong><small>{r.date} · {r.doctor}</small></span><ArrowUpRight size={17}/></button>)}</section>
-    <p className="journal-disclaimer"><ShieldCheck size={14}/> Health measurements on this demo are illustrative. Phone motion step detection is approximate, runs only while this page is open, and is not a medical device.</p>
+    <section className="journal-record-strip"><div className="record-strip-intro"><span className="journal-section-label"><FileHeart size={15}/> KEEP CLOSE</span><h3>Your latest care notes.</h3><button className="journal-link" onClick={() => go('Medical records')}>All records <ArrowRight size={14}/></button></div>{records.slice(0, 2).map((record) => <button className="journal-record" key={record.id} onClick={() => setSelectedRecord(record)}><span className={`record-icon ${record.tint}`}><record.icon size={18}/></span><span><strong>{record.title}</strong><small>{record.date} · {record.doctor}</small></span><ArrowUpRight size={17}/></button>)}{!portalLoading && records.length === 0 && <p>No medical records are saved to your account yet.</p>}</section>
   </div>;
 
-  const FindDoctorPage = () => <><div className="page-intro-card doctor-intro"><div><div className="eyebrow"><span className="eyebrow-dot"/> CARE THAT FITS YOU</div><h2>Feel better with the right care.</h2><p>Connect with trusted specialists and make time for your health.</p><button className="btn btn-primary" onClick={() => setShowBooking(true)}><CalendarDays size={16}/> Book a consultation</button></div><div className="doctor-intro-art"><div className="doctor-art-circle"><Stethoscope size={62}/></div><span className="float-star">✦</span><span className="float-plus"><Plus size={20}/></span></div></div><div className="section-heading"><div><h2>Meet your care team</h2><p>Experienced specialists, here for you</p></div><span className="results-count">{filteredDoctors.length} doctors available</span></div><div className="filter-row"><div className="search-field"><Search size={17}/><input placeholder="Search doctor or specialty" value={search} onChange={e => setSearch(e.target.value)}/></div><select className="filter-select" value={doctorFilter} onChange={e => setDoctorFilter(e.target.value)}><option>All specialties</option>{[...new Set(doctors.map(d => d.specialty))].map(s => <option key={s}>{s}</option>)}</select></div><div className="doctor-grid">{filteredDoctors.map(d => <div className="doctor-card" key={d.id}><div className="doctor-card-top"><Avatar initials={d.initials} color={d.color} size="xl"/><span className="rating"><Star size={14} fill="currentColor"/> {d.rating}</span><button className="icon-button tiny" onClick={() => setSelectedDoctor(d)} aria-label="Doctor details"><MoreHorizontal size={18}/></button></div><h3>{d.name} <Badge tone="green"><BadgeCheck size={12}/> Verified</Badge></h3><p>{d.specialty}</p><div className="doctor-experience"><span><ShieldCheck size={15}/>{d.experience}</span><span><MessageCircle size={15}/> English, Hindi</span></div><div className="doctor-availability"><span className="availability-dot"/><div><small>Next available</small><strong>{d.available}</strong></div></div><div className="doctor-card-bottom"><div><small>Consultation fee</small><strong>{d.fee}</strong></div><button className="btn btn-primary" onClick={() => { setBooking({...booking, doctor: d.name}); setShowBooking(true); }}>Book visit <ArrowRight size={14}/></button></div></div>)}</div></>;
+  const FindDoctorPage = () => <>
+    <div className="page-intro-card doctor-intro"><div><div className="eyebrow"><span className="eyebrow-dot"/> CARE THAT FITS YOU</div><h2>Find an active care provider.</h2><p>Only active doctor accounts with linked profiles are listed. Bookings use times set by each doctor.</p><button className="btn btn-primary" onClick={() => setShowBooking(true)} disabled={!doctors.length}><CalendarDays size={16}/> Book a consultation</button></div><div className="doctor-intro-art"><div className="doctor-art-circle"><Stethoscope size={62}/></div><span className="float-star">✦</span><span className="float-plus"><Plus size={20}/></span></div></div>
+    <div className="section-heading"><div><h2>Available doctors</h2><p>Verified active doctor accounts</p></div><span className="results-count">{doctorsLoading ? 'Loading…' : doctorsError ? 'Unavailable' : `${filteredDoctors.length} doctors available`}</span></div>
+    <div className="filter-row"><div className="search-field"><Search size={17}/><input placeholder="Search doctor or specialty" value={search} onChange={e => setSearch(e.target.value)}/></div><select className="filter-select" value={doctorFilter} onChange={e => setDoctorFilter(e.target.value)}><option>All specialties</option>{[...new Set(doctors.map((doctor) => doctor.specialty))].map(specialty => <option key={specialty}>{specialty}</option>)}</select></div>
+    {doctorsLoading ? <div className="empty-state"><Stethoscope size={28}/><strong>Loading doctors</strong><span>Fetching active profiles from the hospital directory.</span></div> : doctorsError ? <div className="empty-state"><AlertCircle size={28}/><strong>Doctor directory unavailable</strong><span>{doctorsError}</span><button className="btn btn-outline" onClick={() => setDoctorRequestVersion(version => version + 1)}>Retry</button></div> : filteredDoctors.length === 0 ? <div className="empty-state"><Stethoscope size={28}/><strong>{doctors.length ? 'No matching doctors found' : 'No active doctors found'}</strong><span>{doctors.length ? 'Try a different name or specialty.' : 'There are no active, linked doctor profiles available.'}</span></div> : <div className="doctor-grid">{filteredDoctors.map((doctor) => <div className="doctor-card" key={doctor.id}><div className="doctor-card-top"><Avatar initials={doctor.initials} color={doctor.color} size="xl"/><button className="icon-button tiny" onClick={() => setSelectedDoctor(doctor)} aria-label="Doctor details"><MoreHorizontal size={18}/></button></div><h3>{doctor.name} <Badge tone="green"><BadgeCheck size={12}/> Active</Badge></h3><p>{doctor.specialty}{doctor.department ? ` · ${doctor.department}` : ''}</p><div className="doctor-experience"><span><ShieldCheck size={15}/>{doctor.experience}</span></div><div className="doctor-availability"><span className="availability-dot"/><div><small>Appointment schedule</small><strong>{doctor.hasAvailability ? 'View available times' : 'Schedule not configured'}</strong></div></div><div className="doctor-card-bottom"><span/><button className="btn btn-primary" onClick={() => { setBooking({ ...booking, doctorId: doctor.id, startAt: '' }); setShowBooking(true); }}>Book visit <ArrowRight size={14}/></button></div></div>)}</div>}
+  </>;
 
-  const AppointmentsPage = () => <><div className="page-actions"><div className="mini-stat"><span className="mini-stat-icon teal"><CalendarCheck size={18}/></span><div><strong>{appointmentsList.filter(a => a.status !== 'Cancelled').length}</strong><small>Total active visits</small></div></div><button className="btn btn-primary" onClick={() => setShowBooking(true)}><Plus size={17}/> Book appointment</button></div><div className="appointment-summary-grid"><div className="summary-tile"><span className="summary-icon blue"><CalendarDays size={18}/></span><span>Upcoming visits</span><strong>{appointmentsList.filter(a => new Date(a.date+'T23:59:00') >= new Date() && a.status !== 'Cancelled').length.toString().padStart(2,'0')}</strong><small>Scheduled for you</small></div><div className="summary-tile"><span className="summary-icon green"><CheckCircle2 size={18}/></span><span>Completed visits</span><strong>08</strong><small>Care milestones reached</small></div><div className="summary-tile"><span className="summary-icon orange"><Clock3 size={18}/></span><span>Pending requests</span><strong>{appointmentsList.filter(a => a.status === 'Pending').length.toString().padStart(2,'0')}</strong><small>Awaiting confirmation</small></div></div><section className="panel page-panel"><SectionHeading title="Your appointments" subtitle="All your visits in one place"/><div className="appointment-list">{appointmentsList.map(a => <div className="appointment-list-row" key={a.id}><AppointmentCard appointment={a}/>{a.status !== 'Cancelled' && <button className="subtle-link" onClick={() => cancelAppointment(a.id)}>Cancel visit</button>}</div>)}</div>{appointmentsList.length === 0 && <div className="empty-state"><CalendarDays size={30}/><strong>No appointments yet</strong><span>Your booked visits will appear here.</span></div>}</section><div className="info-banner"><span className="info-banner-icon"><AlertCircle size={19}/></span><div><strong>Need to reschedule?</strong><p>You can cancel a pending visit and book a new time that works better for you.</p></div><button className="text-button" onClick={() => setShowBooking(true)}>Book a new time <ArrowRight size={14}/></button></div></>;
+  const AppointmentsPage = () => <>
+    <div className="page-actions"><div className="mini-stat"><span className="mini-stat-icon teal"><CalendarCheck size={18}/></span><div><strong>{appointmentsList.filter((appointment) => appointment.status === 'Scheduled').length}</strong><small>Scheduled visits</small></div></div><button className="btn btn-primary" onClick={() => setShowBooking(true)} disabled={!doctors.length}><Plus size={17}/> Book appointment</button></div>
+    <div className="appointment-summary-grid"><div className="summary-tile"><span className="summary-icon blue"><CalendarDays size={18}/></span><span>Scheduled visits</span><strong>{appointmentStatusCounts.scheduled.toString().padStart(2, '0')}</strong><small>Saved to your account</small></div><div className="summary-tile"><span className="summary-icon green"><CheckCircle2 size={18}/></span><span>Completed visits</span><strong>{appointmentStatusCounts.completed.toString().padStart(2, '0')}</strong><small>Saved to your account</small></div><div className="summary-tile"><span className="summary-icon orange"><Clock3 size={18}/></span><span>Cancelled visits</span><strong>{appointmentStatusCounts.cancelled.toString().padStart(2, '0')}</strong><small>Saved to your account</small></div></div>
+    <section className="panel page-panel"><SectionHeading title="Your appointments" subtitle="Appointments saved to your account"/>{portalLoading ? <div className="empty-state">Loading appointments…</div> : <div className="appointment-list">{appointmentsList.map((appointment) => <div className="appointment-list-row" key={appointment.id}><AppointmentCard appointment={appointment}/>{appointment.status === 'Scheduled' && <button className="subtle-link" onClick={() => cancelAppointment(appointment.id)}>Cancel visit</button>}</div>)}</div>}{!portalLoading && appointmentsList.length === 0 && <div className="empty-state"><CalendarDays size={30}/><strong>No appointments yet</strong><span>Your booked visits will appear here.</span></div>}</section>
+    <div className="info-banner"><span className="info-banner-icon"><AlertCircle size={19}/></span><div><strong>Need to reschedule?</strong><p>Cancel a scheduled visit, then choose another available time.</p></div><button className="text-button" onClick={() => setShowBooking(true)} disabled={!doctors.length}>Book a new time <ArrowRight size={14}/></button></div>
+  </>;
 
-  const MedicalRecordsPage = () => <><div className="records-hero"><div className="records-hero-icon"><FileHeart size={28}/></div><div><h2>Your health, all in one place.</h2><p>Securely access your reports, prescriptions, and consultation summaries.</p></div><div className="records-hero-count"><strong>{records.length.toString().padStart(2,'0')}</strong><span>Documents available</span></div></div><div className="record-metrics"><div><span className="metric-icon pink"><HeartPulse size={17}/></span><span><strong>2</strong><small>Consultations</small></span></div><div><span className="metric-icon blue"><Droplets size={17}/></span><span><strong>1</strong><small>Lab reports</small></span></div><div><span className="metric-icon orange"><Pill size={17}/></span><span><strong>1</strong><small>Prescriptions</small></span></div></div><div className="section-heading records-heading"><div><h2>All documents</h2><p>Browse your health history</p></div><button className="btn btn-outline" onClick={() => notify('Demo export: your records are ready to download when backend is connected.')}><Download size={16}/> Export records</button></div><div className="filter-row"><div className="search-field"><Search size={17}/><input placeholder="Search your records" value={search} onChange={e => setSearch(e.target.value)}/></div><select className="filter-select" value={recordFilter} onChange={e => setRecordFilter(e.target.value)}><option>All records</option>{[...new Set(records.map(r => r.category))].map(s => <option key={s}>{s}</option>)}</select></div><section className="panel records-table-panel"><div className="table-scroll"><table><thead><tr><th>RECORD NAME</th><th>PROVIDER</th><th>DATE ADDED</th><th>TYPE</th><th></th></tr></thead><tbody>{filteredRecords.map(r => <tr key={r.id}><td><button className="table-record" onClick={() => setSelectedRecord(r)}><span className={`record-icon ${r.tint}`}><r.icon size={17}/></span><span><strong>{r.title}</strong><small>{r.id}</small></span></button></td><td>{r.doctor}</td><td>{r.date}</td><td><span className="record-type">{r.category}</span></td><td><button className="icon-button tiny" onClick={() => setSelectedRecord(r)} aria-label="Open record"><ArrowRight size={16}/></button></td></tr>)}</tbody></table>{filteredRecords.length === 0 && <div className="empty-state"><FileText size={28}/><strong>No matching records</strong><span>Try changing your search or filter.</span></div>}</div></section><p className="privacy-note"><ShieldCheck size={15}/> Your medical records are private and should only be accessed by you and authorized care providers.</p></>;
+  const MedicalRecordsPage = () => <>
+    <div className="records-hero"><div className="records-hero-icon"><FileHeart size={28}/></div><div><h2>Your health, all in one place.</h2><p>Securely access records explicitly saved by your care team.</p></div><div className="records-hero-count"><strong>{portalLoading ? '—' : recordsTotal.toString().padStart(2, '0')}</strong><span>Documents available</span></div></div>
+    <div className="section-heading records-heading"><div><h2>All documents</h2><p>Browse records linked to your patient account</p></div></div>
+    <div className="filter-row"><div className="search-field"><Search size={17}/><input placeholder="Search your records" value={search} onChange={e => setSearch(e.target.value)}/></div><select className="filter-select" value={recordFilter} onChange={e => setRecordFilter(e.target.value)}><option>All records</option>{[...new Set(records.map((record) => record.category))].map(category => <option key={category}>{category}</option>)}</select></div>
+    <section className="panel records-table-panel"><div className="table-scroll"><table><thead><tr><th>RECORD NAME</th><th>PROVIDER</th><th>DATE ADDED</th><th>TYPE</th><th></th></tr></thead><tbody>{filteredRecords.map((record) => <tr key={record.id}><td><button className="table-record" onClick={() => setSelectedRecord(record)}><span className={`record-icon ${record.tint}`}><record.icon size={17}/></span><span><strong>{record.title}</strong><small>{record.recordId}</small></span></button></td><td>{record.doctor}</td><td>{record.date}</td><td><span className="record-type">{record.category}</span></td><td><button className="icon-button tiny" onClick={() => setSelectedRecord(record)} aria-label="Open record"><ArrowRight size={16}/></button></td></tr>)}</tbody></table>{portalLoading ? <div className="empty-state">Loading your medical records…</div> : filteredRecords.length === 0 && <div className="empty-state"><FileText size={28}/><strong>{records.length ? 'No matching records' : 'No medical records saved'}</strong><span>{records.length ? 'Try changing your search or filter.' : 'Records will appear after your care team saves them to your account.'}</span></div>}</div></section><p className="privacy-note"><ShieldCheck size={15}/> Records are read from your account and are not generated by this portal.</p>
+  </>;
 
-  const HealthInsightsPage = () => <><div className="insights-hero"><div><div className="eyebrow"><span className="eyebrow-dot"/> YOUR WELLNESS, VISUALIZED</div><h2>Progress, not perfection.</h2><p>Small healthy habits add up. Here’s what your recent activity is telling you.</p></div><div className="insights-score"><div className="score-ring"><div><strong>82</strong><small>/100</small></div></div><span>Wellness score</span><Badge tone="green">Looking good</Badge></div></div><div className="stats-grid insight-stats"><StatCard label="Resting heart rate" value="70" unit="bpm" change="Stable" note="past 7 days" icon={HeartPulse} color="coral"/><StatCard label="Average sleep" value="7.6" unit="hours" change="+0.8 hrs" note="vs. last week" icon={Clock3} color="purple"/><StatCard label="Daily steps" value="6,842" unit="steps" change="+12.8%" note="vs. last week" icon={Footprints} color="teal"/><StatCard label="Hydration" value="5" unit="/ 8 glasses" change="62%" note="daily goal" icon={Droplets} color="blue"/></div><div className="dashboard-grid"><section className="panel activity-panel"><div className="panel-heading"><div><div className="heading-with-icon"><span className="mini-icon coral"><HeartPulse size={17}/></span><h3>Heart rate trend</h3></div><p>Resting heart rate over the last 7 days</p></div><Badge tone="green">Stable</Badge></div><div className="large-chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={heartData} margin={{top: 10,right: 10,left: -20,bottom: 0}}><defs><linearGradient id="heartFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#ee8b9b" stopOpacity={0.24}/><stop offset="95%" stopColor="#ee8b9b" stopOpacity={0.01}/></linearGradient></defs><CartesianGrid strokeDasharray="3 5" vertical={false} stroke="#edf0f5"/><XAxis dataKey="day" axisLine={false} tickLine={false} tick={{fill:'#98a1b2',fontSize:11}}/><YAxis domain={[60,80]} axisLine={false} tickLine={false} tick={{fill:'#98a1b2',fontSize:10}}/><Tooltip contentStyle={{border:'1px solid #edf0f5',borderRadius:12,fontSize:12}} formatter={v=>[`${v} bpm`,'Resting heart rate']}/><Area type="monotone" dataKey="value" stroke="#e8798b" strokeWidth={2.5} fill="url(#heartFill)" activeDot={{r:5,strokeWidth:0}}/></AreaChart></ResponsiveContainer></div><div className="chart-footnote"><span className="footnote-icon"><Check size={13}/></span><span>Your recent resting heart-rate readings are <strong>consistent in this demo.</strong></span></div></section><section className="panel health-goals-panel"><div className="panel-heading"><div><div className="heading-with-icon"><span className="mini-icon teal"><Sparkles size={17}/></span><h3>Daily goals</h3></div><p>How you're doing today</p></div></div>{[{label:'Movement',detail:'6,842 of 8,000 steps',percent:85,color:'teal',icon:Footprints},{label:'Hydration',detail:'5 of 8 glasses',percent:63,color:'blue',icon:Droplets},{label:'Sleep',detail:'7.6 of 8 hours',percent:95,color:'purple',icon:Clock3}].map(goal=><div className="goal-item" key={goal.label}><div className={`goal-icon ${goal.color}`}><goal.icon size={17}/></div><div className="goal-main"><div><strong>{goal.label}</strong><span>{goal.detail}</span></div><strong>{goal.percent}%</strong><div className="progress-track"><i className={goal.color} style={{width:`${goal.percent}%`}}/></div></div></div>)}<div className="goal-note"><Sparkles size={16}/><span>Consistency matters more than perfection. Keep building your routine.</span></div></section></div><section className="panel health-note-panel"><div className="note-icon"><ShieldCheck size={20}/></div><div><strong>A note about your health insights</strong><p>These charts use sample data for this project demonstration. They are not medical advice or a diagnosis. Always discuss health concerns with a qualified healthcare professional.</p></div></section></>;
+  const HealthInsightsPage = () => <section className="panel health-note-panel"><div className="note-icon"><ShieldCheck size={20}/></div><div><strong>No wellness insights are available yet</strong><p>This portal does not generate health measurements. Insights will only appear after a supported health-data integration records them to your account.</p></div></section>;
 
-  const ProfilePage = () => <div className="profile-layout"><section className="panel profile-card"><div className="profile-cover"><div className="cover-shape cover-shape-one"/><div className="cover-shape cover-shape-two"/></div><div className="profile-main"><Avatar initials={profile.name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase()} color="blue" size="profile"/><div className="profile-title"><h2>{profile.name}</h2><p>Patient account</p><Badge tone="green"><ShieldCheck size={12}/> Verified patient</Badge></div><button className="btn btn-outline" onClick={() => {setProfileDraft(profile);setProfileEditing(true);}}><Settings size={15}/> Edit profile</button></div><div className="profile-divider"/><div className="profile-section-title"><h3>Personal information</h3><span>Your details are kept private</span></div><div className="profile-fields"><div><small>Full name</small><strong>{profile.name}</strong></div><div><small>Email address</small><strong>{profile.email}</strong></div><div><small>Phone number</small><strong>{profile.phone}</strong></div><div><small>Date of birth</small><strong>{new Date(profile.dob+'T12:00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'})}</strong></div><div><small>Blood group</small><strong>{profile.blood}</strong></div><div><small>Emergency contact</small><strong>{profile.emergency}</strong></div></div></section><div className="profile-side"><section className="panel insurance-card"><div className="heading-with-icon"><span className="mini-icon teal"><ShieldCheck size={17}/></span><h3>Account & privacy</h3></div><p>Manage your account preferences and personal data.</p><div className="privacy-list"><div><span><ShieldCheck size={16}/></span><div><strong>Privacy settings</strong><small>Review who can access your records</small></div><ChevronRight size={16}/></div><div><span><Bell size={16}/></span><div><strong>Notifications</strong><small>Appointment and health reminders</small></div><ChevronRight size={16}/></div><div><span><CircleHelp size={16}/></span><div><strong>Help & support</strong><small>Get assistance with your account</small></div><ChevronRight size={16}/></div></div></section><section className="panel blood-card"><div className="blood-card-icon"><Droplets size={19}/></div><span>YOUR BLOOD GROUP</span><strong>{profile.blood}</strong><p>Keep this information up to date for your care team.</p></section></div></div>;
+  const ProfilePage = () => <div className="profile-layout">
+    <section className="panel profile-card"><div className="profile-cover"><div className="cover-shape cover-shape-one"/><div className="cover-shape cover-shape-two"/></div>
+      <div className="profile-main"><Avatar initials={initials(profile.name)} color="blue" size="profile"/><div className="profile-title"><h2>{profile.name || 'Patient'}</h2><p>Patient account</p><Badge tone="green"><ShieldCheck size={12}/> Verified patient</Badge></div><button className="btn btn-outline" onClick={() => { setProfileDraft(profile); setProfileEditing(true); }}><Settings size={15}/> Edit profile</button></div>
+      <div className="profile-divider"/><div className="profile-section-title"><h3>Personal information</h3><span>Your details are kept private</span></div>
+      <div className="profile-fields"><div><small>Full name</small><strong>{profile.name || 'Not provided'}</strong></div><div><small>Email address</small><strong>{profile.email || 'Not provided'}</strong></div><div><small>Phone number</small><strong>{profile.phone || 'Not provided'}</strong></div><div><small>Date of birth</small><strong>{profile.dob ? new Date(`${profile.dob}T12:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }) : 'Not provided'}</strong></div><div><small>Blood group</small><strong>{profile.blood || 'Not provided'}</strong></div><div><small>Emergency contact</small><strong>{profile.emergency || 'Not provided'}</strong></div></div>
+    </section>
+    <div className="profile-side"><section className="panel insurance-card"><div className="heading-with-icon"><span className="mini-icon teal"><ShieldCheck size={17}/></span><h3>Account & privacy</h3></div><p>Manage your account preferences and personal data.</p><div className="privacy-list"><div><span><ShieldCheck size={16}/></span><div><strong>Privacy settings</strong><small>Clinical access is limited to authorized care relationships</small></div><ChevronRight size={16}/></div><div><span><Bell size={16}/></span><div><strong>Notifications</strong><small>No notification service is configured</small></div><ChevronRight size={16}/></div><div><span><CircleHelp size={16}/></span><div><strong>Help & support</strong><small>Get assistance with your account</small></div><ChevronRight size={16}/></div></div></section><section className="panel blood-card"><div className="blood-card-icon"><Droplets size={19}/></div><span>YOUR BLOOD GROUP</span><strong>{profile.blood || 'Not provided'}</strong><p>Update this information in your profile if needed.</p></section></div>
+  </div>;
 
-  const HelpPage = () => <div className="help-layout"><section className="panel help-hero"><span className="help-hero-icon"><MessageCircle size={28}/></span><h2>We're here to help.</h2><p>Find the support you need to make the most of your patient portal.</p><button className="btn btn-primary" onClick={() => notify('Demo support request submitted.')}>Contact support <ArrowRight size={15}/></button></section><div className="help-cards"><button className="panel help-card" onClick={() => notify('FAQs are part of the demo content.')}><span className="help-card-icon teal"><CircleHelp size={20}/></span><strong>Frequently asked questions</strong><p>Answers to common questions about your portal.</p><ArrowRight size={17}/></button><button className="panel help-card" onClick={() => notify('Privacy help opened in demo mode.')}><span className="help-card-icon purple"><ShieldCheck size={20}/></span><strong>Privacy & security</strong><p>Learn how your health information should be protected.</p><ArrowRight size={17}/></button><button className="panel help-card" onClick={() => setShowBooking(true)}><span className="help-card-icon orange"><CalendarDays size={20}/></span><strong>Appointment assistance</strong><p>Need help planning or changing a visit?</p><ArrowRight size={17}/></button></div></div>;
+  const HelpPage = () => <div className="help-layout"><section className="panel help-hero"><span className="help-hero-icon"><MessageCircle size={28}/></span><h2>We're here to help.</h2><p>Find the support you need to make the most of your patient portal.</p><button className="btn btn-primary" onClick={() => notify('Support is not configured for this portal yet.')}>Contact support <ArrowRight size={15}/></button></section><div className="help-cards"><button className="panel help-card" onClick={() => notify('FAQs are not configured for this portal yet.')}><span className="help-card-icon teal"><CircleHelp size={20}/></span><strong>Frequently asked questions</strong><p>Answers to common questions about your portal.</p><ArrowRight size={17}/></button><button className="panel help-card" onClick={() => notify('Privacy support is not configured for this portal yet.')}><span className="help-card-icon purple"><ShieldCheck size={20}/></span><strong>Privacy & security</strong><p>Learn how your health information should be protected.</p><ArrowRight size={17}/></button><button className="panel help-card" onClick={() => setShowBooking(true)}><span className="help-card-icon orange"><CalendarDays size={20}/></span><strong>Appointment assistance</strong><p>Need help planning or changing a visit?</p><ArrowRight size={17}/></button></div></div>;
 
   const renderPage = () => {
     if (page === 'Dashboard') return <Dashboard/>;
@@ -206,10 +396,19 @@ export function PatientDashboard({ user, onLogout }) {
   };
 
   return <div className="app-shell"><Sidebar/>{mobileNav && <button className="mobile-overlay" onClick={() => setMobileNav(false)} aria-label="Close navigation"/>}<div className="main-shell"><Header/><main className="main-content"><div className="page-title-row"><div><h1>{pageMeta[page][0]}</h1><p>{pageMeta[page][1]}</p></div><div className="today-pill"><span className="today-dot"/><span>{new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}</span></div></div>{renderPage()}<footer className="main-footer"><span>© 2026 MediCare Patient Portal</span><span><ShieldCheck size={14}/> Your health information deserves care.</span><button onClick={() => go('Help & support')}>Need help?</button></footer></main></div>
-    {showBooking && <Modal title="Book an appointment" onClose={() => setShowBooking(false)}><form className="modal-form" onSubmit={addBooking}><label>Choose a doctor<select required value={booking.doctor} onChange={e => setBooking({...booking,doctor:e.target.value})}>{doctors.map(d=><option key={d.id}>{d.name}</option>)}</select></label><div className="form-two"><label>Date<input type="date" required min="2026-10-24" value={booking.date} onChange={e=>setBooking({...booking,date:e.target.value})}/></label><label>Time<select value={booking.time} onChange={e=>setBooking({...booking,time:e.target.value})}><option value="09:00">09:00 AM</option><option value="10:30">10:30 AM</option><option value="11:00">11:00 AM</option><option value="14:00">02:00 PM</option><option value="15:30">03:30 PM</option></select></label></div><label>Appointment type<select value={booking.type} onChange={e=>setBooking({...booking,type:e.target.value})}><option>In-person</option><option>Video consultation</option></select></label><label>Reason for visit<input value={booking.reason} onChange={e=>setBooking({...booking,reason:e.target.value})} placeholder="e.g. Routine check-up" required/></label><div className="modal-note"><ShieldCheck size={16}/><span>Your request will appear in your appointment list. This demo does not send a real booking to a hospital.</span></div><div className="modal-actions"><button type="button" className="btn btn-outline" onClick={()=>setShowBooking(false)}>Cancel</button><button type="submit" className="btn btn-primary">Request appointment <ArrowRight size={15}/></button></div></form></Modal>}
-    {selectedRecord && <Modal title={selectedRecord.title} onClose={()=>setSelectedRecord(null)}><div className="record-detail"><span className={`record-icon ${selectedRecord.tint}`}><selectedRecord.icon size={22}/></span><Badge tone="blue">{selectedRecord.category}</Badge><p>{selectedRecord.description}</p><div className="detail-line"><span>Record ID</span><strong>{selectedRecord.id}</strong></div><div className="detail-line"><span>Provider</span><strong>{selectedRecord.doctor}</strong></div><div className="detail-line"><span>Date</span><strong>{selectedRecord.date}</strong></div><div className="modal-note"><ShieldCheck size={16}/><span>This is fictional sample data for the project preview.</span></div><button className="btn btn-primary full-btn" onClick={()=>{setSelectedRecord(null);notify('Record download will be available after backend integration.')}}><Download size={15}/> Download record</button></div></Modal>}
-    {selectedDoctor && <Modal title="Doctor profile" onClose={()=>setSelectedDoctor(null)}><div className="doctor-detail"><Avatar initials={selectedDoctor.initials} color={selectedDoctor.color} size="xl"/><h3>{selectedDoctor.name}</h3><p>{selectedDoctor.specialty} · {selectedDoctor.experience}</p><div className="doctor-detail-stats"><div><Star size={15} fill="currentColor"/><strong>{selectedDoctor.rating}</strong><small>Patient rating</small></div><div><strong>{selectedDoctor.fee}</strong><small>Consultation fee</small></div></div><div className="detail-line"><span>Next available</span><strong>{selectedDoctor.available}</strong></div><button className="btn btn-primary full-btn" onClick={()=>{setBooking({...booking,doctor:selectedDoctor.name});setSelectedDoctor(null);setShowBooking(true);}}>Book appointment <ArrowRight size={15}/></button></div></Modal>}
-    {profileEditing && <Modal title="Edit your profile" onClose={()=>setProfileEditing(false)}><form className="modal-form" onSubmit={e=>{e.preventDefault();setProfile(profileDraft);setProfileEditing(false);notify('Profile updated in this demo.')}}><label>Full name<input required value={profileDraft.name} onChange={e=>setProfileDraft({...profileDraft,name:e.target.value})}/></label><label>Email address<input type="email" required value={profileDraft.email} onChange={e=>setProfileDraft({...profileDraft,email:e.target.value})}/></label><label>Phone number<input required value={profileDraft.phone} onChange={e=>setProfileDraft({...profileDraft,phone:e.target.value})}/></label><div className="form-two"><label>Date of birth<input type="date" value={profileDraft.dob} onChange={e=>setProfileDraft({...profileDraft,dob:e.target.value})}/></label><label>Blood group<select value={profileDraft.blood} onChange={e=>setProfileDraft({...profileDraft,blood:e.target.value})}>{['A+','A-','B+','B-','AB+','AB-','O+','O-','Unknown'].map(v=><option key={v}>{v}</option>)}</select></label></div><label>Emergency contact<input value={profileDraft.emergency} onChange={e=>setProfileDraft({...profileDraft,emergency:e.target.value})}/></label><div className="modal-actions"><button type="button" className="btn btn-outline" onClick={()=>setProfileEditing(false)}>Cancel</button><button type="submit" className="btn btn-primary"><Check size={15}/> Save changes</button></div></form></Modal>}
+    {showBooking && <Modal title="Book an appointment" onClose={() => setShowBooking(false)}><form className="modal-form" onSubmit={addBooking}>
+      <label>Choose a doctor<select required value={booking.doctorId} onChange={event => setBooking({ ...booking, doctorId: event.target.value, startAt: '' })}><option value="">Select a doctor</option>{doctors.map(doctor => <option key={doctor.id} value={doctor.id}>{doctor.name} · {doctor.specialty}</option>)}</select></label>
+      <div className="form-two"><label>Date<input type="date" required min={formatDateKey(Date.now())} value={booking.date} onChange={event => setBooking({ ...booking, date: event.target.value, startAt: '' })}/></label>
+      <label>Available time<select required value={booking.startAt} onChange={event => setBooking({ ...booking, startAt: event.target.value })} disabled={slotsLoading || !bookingSlots.length}><option value="">{slotsLoading ? 'Loading times…' : 'Select an available time'}</option>{bookingSlots.map(slot => <option key={slot.startAt} value={slot.startAt}>{slot.time} ({slotTimeZone})</option>)}</select></label></div>
+      {slotsError && <p className="form-error">{slotsError}</p>}
+      {!slotsLoading && booking.doctorId && !bookingSlots.length && !slotsError && <p className="modal-note"><CalendarDays size={16}/><span>{doctors.find(doctor => doctor.id === booking.doctorId)?.hasAvailability ? 'No available times for this doctor on the selected date.' : 'This doctor has not configured an appointment schedule.'}</span></p>}
+      <label>Reason for visit<input value={booking.reason} onChange={event => setBooking({ ...booking, reason: event.target.value })} placeholder="Briefly describe your visit" maxLength={500} required/></label>
+      <div className="modal-note"><ShieldCheck size={16}/><span>Only times available in the doctor’s saved schedule can be booked.</span></div>
+      <div className="modal-actions"><button type="button" className="btn btn-outline" onClick={() => setShowBooking(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={bookingSaving || slotsLoading || !booking.startAt || !doctors.length}>{bookingSaving ? 'Saving…' : 'Request appointment'} <ArrowRight size={15}/></button></div>
+    </form></Modal>}
+    {selectedRecord && <Modal title={selectedRecord.title} onClose={() => setSelectedRecord(null)}><div className="record-detail"><span className={`record-icon ${selectedRecord.tint}`}><selectedRecord.icon size={22}/></span><Badge tone="blue">{selectedRecord.category}</Badge><p>{selectedRecord.description}</p><div className="detail-line"><span>Record ID</span><strong>{selectedRecord.recordId}</strong></div><div className="detail-line"><span>Provider</span><strong>{selectedRecord.doctor}</strong></div><div className="detail-line"><span>Date</span><strong>{selectedRecord.date}</strong></div><div className="modal-note"><ShieldCheck size={16}/><span>This content is from the medical record saved to your patient account.</span></div></div></Modal>}
+    {selectedDoctor && <Modal title="Doctor profile" onClose={() => setSelectedDoctor(null)}><div className="doctor-detail"><Avatar initials={selectedDoctor.initials} color={selectedDoctor.color} size="xl"/><h3>{selectedDoctor.name}</h3><p>{selectedDoctor.specialty}{selectedDoctor.department ? ` · ${selectedDoctor.department}` : ''}</p><div className="detail-line"><span>Qualifications</span><strong>{selectedDoctor.experience}</strong></div><div className="detail-line"><span>Schedule</span><strong>{selectedDoctor.hasAvailability ? 'Configured' : 'Not configured'}</strong></div><button className="btn btn-primary full-btn" onClick={() => { setBooking({ ...booking, doctorId: selectedDoctor.id, startAt: '' }); setSelectedDoctor(null); setShowBooking(true); }}>Book appointment <ArrowRight size={15}/></button></div></Modal>}
+    {profileEditing && <Modal title="Edit your profile" onClose={() => setProfileEditing(false)}><form className="modal-form" onSubmit={saveProfile}><label>Full name<input required value={profileDraft.name} onChange={event => setProfileDraft({ ...profileDraft, name: event.target.value })}/></label><label>Email address<input type="email" required value={profileDraft.email} onChange={event => setProfileDraft({ ...profileDraft, email: event.target.value })}/></label><label>Phone number<input value={profileDraft.phone} onChange={event => setProfileDraft({ ...profileDraft, phone: event.target.value })}/></label><div className="form-two"><label>Date of birth<input type="date" value={profileDraft.dob} onChange={event => setProfileDraft({ ...profileDraft, dob: event.target.value })}/></label><label>Blood group<select value={profileDraft.blood} onChange={event => setProfileDraft({ ...profileDraft, blood: event.target.value })}><option value="">Not provided</option>{['A+','A-','B+','B-','AB+','AB-','O+','O-','Unknown'].map(value => <option key={value}>{value}</option>)}</select></label></div><label>Emergency contact<input value={profileDraft.emergency} onChange={event => setProfileDraft({ ...profileDraft, emergency: event.target.value })}/></label><div className="modal-actions"><button type="button" className="btn btn-outline" onClick={() => setProfileEditing(false)}>Cancel</button><button type="submit" className="btn btn-primary"><Check size={15}/> Save changes</button></div></form></Modal>}
     {toast && <div className="toast"><span><Check size={15}/></span>{toast}<button onClick={()=>setToast('')} aria-label="Dismiss notification"><X size={14}/></button></div>}
   </div>;
 }

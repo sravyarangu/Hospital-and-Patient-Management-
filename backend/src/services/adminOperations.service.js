@@ -3,7 +3,7 @@ import { ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
 import neo4j from 'neo4j-driver';
 import { env } from '../config/env.js';
-import { getMongoDatabase } from '../config/mongodb.js';
+import { getMongoClient, getMongoDatabase } from '../config/mongodb.js';
 import { getNeo4jDriver } from '../config/neo4j.js';
 
 const roles = new Set(['patient', 'doctor', 'admin']);
@@ -30,6 +30,70 @@ export function getZonedWeekdayAndTime(date, timeZone = 'UTC') {
   return { day, time: `${values.hour}:${values.minute}` };
 }
 
+const maxAppointmentDurationMinutes = 120;
+
+export function appointmentDuration(doctor, appointment = {}) {
+  const duration = Number(appointment.durationMinutes ?? doctor.availabilityDurationMinutes ?? 30);
+  return Number.isInteger(duration) && duration >= 15 && duration <= maxAppointmentDurationMinutes
+    ? duration
+    : 30;
+}
+
+export function fitsDoctorAvailability(availability, timeZone, scheduledAt, durationMinutes) {
+  if (!Array.isArray(availability) || availability.length === 0) return false;
+  const endAt = new Date(scheduledAt.valueOf() + durationMinutes * 60000);
+  const start = getZonedWeekdayAndTime(scheduledAt, timeZone);
+  const end = getZonedWeekdayAndTime(endAt, timeZone);
+  if (start.day !== end.day) return false;
+  const rule = availability.find((entry) => entry.enabled && entry.day === start.day);
+  if (!rule || start.time < rule.start || end.time > rule.end) return false;
+  if (rule.breakStart && start.time < rule.breakEnd && end.time > rule.breakStart) return false;
+  return true;
+}
+
+export function requireMinuteAlignedAppointmentTime(value) {
+  const scheduledAt = new Date(value);
+  if (Number.isNaN(scheduledAt.valueOf()) || scheduledAt.getUTCSeconds() !== 0 || scheduledAt.getUTCMilliseconds() !== 0) {
+    throw new OperationError(400, 'Appointment time must be a valid date aligned to a whole minute.');
+  }
+  return scheduledAt;
+}
+
+export async function assertNoAppointmentOverlap(db, doctorId, scheduledAt, durationMinutes, exceptId, session, doctor = {}) {
+  const endAt = new Date(scheduledAt.valueOf() + durationMinutes * 60000);
+  const filter = {
+    doctorId,
+    status: 'scheduled',
+    scheduledAt: { $gte: new Date(scheduledAt.valueOf() - maxAppointmentDurationMinutes * 60000), $lt: endAt },
+  };
+  if (exceptId) filter._id = { $ne: exceptId };
+  const appointments = await db.collection('appointments').find(filter, { session }).toArray();
+  const conflict = appointments.some((appointment) => {
+    const existingEnd = new Date(appointment.scheduledAt.valueOf() + appointmentDuration(doctor, appointment) * 60000);
+    return appointment.scheduledAt < endAt && existingEnd > scheduledAt;
+  });
+  if (conflict) throw new OperationError(409, 'This time overlaps another scheduled appointment for the doctor.');
+}
+
+export function appointmentMinuteReservations(doctorId, scheduledAt, durationMinutes, appointmentId) {
+  const createdAt = new Date();
+  return Array.from({ length: durationMinutes }, (_, minute) => ({
+    doctorId,
+    scheduledAt: new Date(scheduledAt.valueOf() + minute * 60000),
+    appointmentId,
+    createdAt,
+  }));
+}
+
+function isDuplicateKey(error) {
+  return error?.code === 11000;
+}
+
+function throwAppointmentConflict(error) {
+  if (isDuplicateKey(error)) throw new OperationError(409, 'This time overlaps another scheduled appointment for the doctor.');
+  throw error;
+}
+
 export function parseObjectId(value, label = 'ID') {
   if (typeof value !== 'string' || !ObjectId.isValid(value)) {
     throw new OperationError(400, `${label} is invalid.`);
@@ -44,6 +108,12 @@ export function pageOptions(query) {
     throw new OperationError(400, 'Page must be positive and page size must be between 1 and 100.');
   }
   return { page, limit, skip: (page - 1) * limit };
+}
+
+function safeSearch(value) {
+  return typeof value === 'string'
+    ? value.trim().slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    : '';
 }
 
 export async function audit(actor, action, entity, entityId, metadata = {}) {
@@ -200,6 +270,24 @@ async function syncAndRecord(appointment, patient, doctor) {
   }
 }
 
+async function countLinkedProfiles(profileCollection, role, { activeOnly = false, from, to } = {}) {
+  const pipeline = [
+    { $lookup: { from: 'users', localField: 'userId', foreignField: '_id', as: 'account' } },
+    { $unwind: '$account' },
+    { $match: { 'account.role': role } },
+  ];
+  if (activeOnly) {
+    pipeline.push({ $match: { isActive: true, 'account.isActive': true } });
+  }
+  if (from || to) {
+    pipeline.push({ $addFields: { linkedCreatedAt: { $ifNull: ['$createdAt', '$account.createdAt'] } } });
+    pipeline.push({ $match: { linkedCreatedAt: { ...(from ? { $gte: from } : {}), ...(to ? { $lte: to } : {}) } } });
+  }
+  pipeline.push({ $count: 'count' });
+  const [result] = await getMongoDatabase().collection(profileCollection).aggregate(pipeline).toArray();
+  return result?.count || 0;
+}
+
 export async function getAdminDashboard(fromDate, toDate) {
   const db = getMongoDatabase();
   const now = new Date();
@@ -211,9 +299,9 @@ export async function getAdminDashboard(fromDate, toDate) {
   const todayStart = new Date(now); todayStart.setUTCHours(0, 0, 0, 0);
   const tomorrow = new Date(todayStart); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
   const [totalPatients, recentPatients, activeDoctors, todayAppointments, upcomingAppointments, statusCounts, trend, schedule, recentActivity, graphFailures] = await Promise.all([
-    db.collection('patients').countDocuments(),
-    db.collection('patients').countDocuments({ createdAt: { $gte: start, $lte: end } }),
-    db.collection('doctors').countDocuments({ isActive: { $ne: false } }),
+    countLinkedProfiles('patients', 'patient'),
+    countLinkedProfiles('patients', 'patient', { from: start, to: end }),
+    countLinkedProfiles('doctors', 'doctor', { activeOnly: true }),
     db.collection('appointments').countDocuments({ scheduledAt: { $gte: todayStart, $lt: tomorrow }, status: { $ne: 'cancelled' } }),
     db.collection('appointments').countDocuments({ scheduledAt: { $gte: now }, status: 'scheduled' }),
     db.collection('appointments').aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]).toArray(),
@@ -250,40 +338,105 @@ export async function getAdminDashboard(fromDate, toDate) {
 export async function listPatients(query) {
   const db = getMongoDatabase();
   const { page, limit, skip } = pageOptions(query);
-  const search = typeof query.search === 'string' ? query.search.trim().slice(0, 100) : '';
-  const filter = {};
+  const accounts = await db.collection('users').find({ role: 'patient' }, {
+    projection: { _id: 1, name: 1, email: 1, isActive: 1, createdAt: 1, updatedAt: 1 },
+  }).toArray();
+  const accountsById = new Map(accounts.map((account) => [account._id.toString(), account]));
+  if (!accounts.length) return { items: [], page, limit, total: 0, pages: 0 };
+  const filter = { userId: { $in: accounts.map((account) => account._id) } };
+  const search = safeSearch(query.search);
   if (search) {
-    const safeSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    filter.$or = [
-      { name: { $regex: safeSearch, $options: 'i' } },
-      { email: { $regex: safeSearch, $options: 'i' } },
-      { patientId: { $regex: safeSearch, $options: 'i' } },
-      { userId: { $regex: safeSearch, $options: 'i' } },
-    ];
+    const expression = { $regex: search, $options: 'i' };
+    const matchingUsers = accounts.filter((account) => new RegExp(search, 'i').test(account.name || '') || new RegExp(search, 'i').test(account.email || ''));
+    filter.$and = [{
+      $or: [
+        { name: expression },
+        { email: expression },
+        { patientId: expression },
+        { userId: { $in: matchingUsers.map((account) => account._id) } },
+      ],
+    }];
   }
   const [items, total] = await Promise.all([
-    db.collection('patients').find(filter, { projection: { password: 0, medicalHistory: 0, records: 0 } }).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+    db.collection('patients').find(filter, { projection: { medicalHistory: 0, records: 0, passwordHash: 0 } }).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
     db.collection('patients').countDocuments(filter),
   ]);
-  return { items: items.map((item) => ({ ...item, _id: item._id.toString(), userId: item.userId?.toString() })), page, limit, total, pages: Math.ceil(total / limit) };
+  return {
+    items: items.map((item) => {
+      const account = accountsById.get(item.userId?.toString());
+      return {
+        _id: item._id.toString(),
+        userId: item.userId?.toString(),
+        patientId: item.patientId,
+        name: account?.name || item.name || '',
+        email: account?.email || item.email || '',
+        phone: item.phone || '',
+        isActive: item.isActive === true && account?.isActive === true,
+        createdAt: item.createdAt || account?.createdAt,
+        updatedAt: item.updatedAt || account?.updatedAt,
+      };
+    }),
+    page, limit, total, pages: Math.ceil(total / limit),
+  };
 }
 
 export async function listDoctors(query) {
   const db = getMongoDatabase();
   const { page, limit, skip } = pageOptions(query);
-  const filter = {};
-  if (query.status === 'active') filter.isActive = { $ne: false };
-  if (query.status === 'inactive') filter.isActive = false;
-  if (query.specialization) filter.specialization = String(query.specialization).slice(0, 100);
-  if (query.search) {
-    const safeSearch = String(query.search).trim().slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    filter.$or = ['name', 'email', 'doctorId', 'specialization', 'department'].map((field) => ({ [field]: { $regex: safeSearch, $options: 'i' } }));
+  const accounts = await db.collection('users').find({ role: 'doctor' }, {
+    projection: { _id: 1, name: 1, email: 1, isActive: 1, createdAt: 1, updatedAt: 1 },
+  }).toArray();
+  const accountsById = new Map(accounts.map((account) => [account._id.toString(), account]));
+  if (!accounts.length) return { items: [], page, limit, total: 0, pages: 0 };
+  const filter = { userId: { $in: accounts.map((account) => account._id) } };
+  const and = [];
+  if (query.status === 'active') {
+    filter.userId = { $in: accounts.filter((account) => account.isActive === true).map((account) => account._id) };
+    filter.isActive = true;
   }
+  if (query.status === 'inactive') {
+    and.push({ $or: [
+      { isActive: { $ne: true } },
+      { userId: { $in: accounts.filter((account) => account.isActive !== true).map((account) => account._id) } },
+    ] });
+  }
+  if (query.specialization) filter.specialization = String(query.specialization).slice(0, 100);
+  const search = safeSearch(query.search);
+  if (search) {
+    const expression = { $regex: search, $options: 'i' };
+    const matchingUsers = accounts.filter((account) => new RegExp(search, 'i').test(account.name || '') || new RegExp(search, 'i').test(account.email || ''));
+    and.push({
+      $or: [
+        ...['name', 'email', 'doctorId', 'specialization', 'department'].map((field) => ({ [field]: expression })),
+        { userId: { $in: matchingUsers.map((account) => account._id) } },
+      ],
+    });
+  }
+  if (and.length) filter.$and = and;
   const [items, total] = await Promise.all([
-    db.collection('doctors').find(filter, { projection: { password: 0, medicalHistory: 0 } }).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+    db.collection('doctors').find(filter, { projection: { password: 0, passwordHash: 0, medicalHistory: 0 } }).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
     db.collection('doctors').countDocuments(filter),
   ]);
-  return { items: items.map((item) => ({ ...item, _id: item._id.toString(), userId: item.userId?.toString() })), page, limit, total, pages: Math.ceil(total / limit) };
+  return {
+    items: items.map((item) => {
+      const account = accountsById.get(item.userId?.toString());
+      return {
+        _id: item._id.toString(),
+        userId: item.userId?.toString(),
+        doctorId: item.doctorId,
+        name: account?.name || item.name || '',
+        email: account?.email || item.email || '',
+        phone: item.phone || '',
+        specialization: item.specialization || '',
+        department: item.department || '',
+        qualifications: item.qualifications || '',
+        isActive: item.isActive === true && account?.isActive === true,
+        createdAt: item.createdAt || account?.createdAt,
+        updatedAt: item.updatedAt || account?.updatedAt,
+      };
+    }),
+    page, limit, total, pages: Math.ceil(total / limit),
+  };
 }
 
 export async function listAppointments(query) {
@@ -347,33 +500,35 @@ export async function listAppointments(query) {
   return { items, page, limit, total, pages: Math.ceil(total / limit) };
 }
 
-export async function getAppointmentReferences(patientId, doctorId, scheduledAt, exceptId) {
+export async function getAppointmentReferences(patientId, doctorId, scheduledAt, exceptId, durationMinutes, session) {
   const db = getMongoDatabase();
-  const [patient, doctor] = await Promise.all([
-    db.collection('patients').findOne({ userId: new ObjectId(patientId), isActive: { $ne: false } }),
-    db.collection('doctors').findOne({ userId: new ObjectId(doctorId), isActive: { $ne: false } }),
+  const patientUserId = new ObjectId(patientId);
+  const doctorUserId = new ObjectId(doctorId);
+  const [patient, doctor, patientAccount, doctorAccount] = await Promise.all([
+    db.collection('patients').findOne({ userId: patientUserId, isActive: true }, { session }),
+    db.collection('doctors').findOne({ userId: doctorUserId, isActive: true }, { session }),
+    db.collection('users').findOne({ _id: patientUserId, role: 'patient', isActive: true }, { projection: { _id: 1 }, session }),
+    db.collection('users').findOne({ _id: doctorUserId, role: 'doctor', isActive: true }, { projection: { _id: 1 }, session }),
   ]);
-  if (!patient) throw new OperationError(404, 'Active patient account was not found.');
-  if (!doctor) throw new OperationError(404, 'Active doctor account was not found.');
+  if (!patient || !patientAccount) throw new OperationError(404, 'Active linked patient account was not found.');
+  if (!doctor || !doctorAccount) throw new OperationError(404, 'Active linked doctor account was not found.');
 
-  const slotTime = new Date(scheduledAt);
+  const slotTime = requireMinuteAlignedAppointmentTime(scheduledAt);
   if (Number.isNaN(slotTime.valueOf()) || slotTime <= new Date()) {
     throw new OperationError(400, 'Appointment date must be a valid future date and time.');
   }
-  if (Array.isArray(doctor.availability)) {
-    const { day, time } = getZonedWeekdayAndTime(slotTime, doctor.availabilityTimeZone || 'UTC');
-    const rule = doctor.availability.find((entry) => entry.enabled && entry.day === day);
-    if (!rule || time < rule.start || time >= rule.end || (rule.breakStart && time >= rule.breakStart && time < rule.breakEnd)) {
-      throw new OperationError(409, 'This appointment time is outside the doctor’s saved availability.');
-    }
+  if (!Array.isArray(doctor.availability) || doctor.availability.length === 0) {
+    throw new OperationError(409, 'This doctor has not configured availability. Ask them to save a schedule before booking.');
   }
-
-  const appointments = db.collection('appointments');
-  const conflictFilter = { doctorId, scheduledAt: slotTime, status: 'scheduled' };
-  if (exceptId) conflictFilter._id = { $ne: exceptId };
-  const conflict = await appointments.findOne(conflictFilter, { projection: { _id: 1 } });
-  if (conflict) throw new OperationError(409, 'This doctor already has a scheduled appointment at that time.');
-  return { patient, doctor, scheduledAt: slotTime };
+  const duration = durationMinutes || appointmentDuration(doctor);
+  if (!fitsDoctorAvailability(doctor.availability, doctor.availabilityTimeZone || 'UTC', slotTime, duration)) {
+    throw new OperationError(409, 'This appointment does not fit within the doctor’s saved availability or break periods.');
+  }
+  await assertNoAppointmentOverlap(db, doctorId, slotTime, duration, exceptId, session, doctor);
+  if (session) {
+    await db.collection('doctors').updateOne({ _id: doctor._id }, { $inc: { appointmentScheduleRevision: 1 } }, { session });
+  }
+  return { patient, doctor, scheduledAt: slotTime, durationMinutes: duration };
 }
 
 export async function createAppointment(actor, input) {
@@ -381,34 +536,43 @@ export async function createAppointment(actor, input) {
   const patientId = parseObjectId(input.patientId, 'Patient ID').toString();
   const doctorId = parseObjectId(input.doctorId, 'Doctor ID').toString();
   const reason = requireText(input.reason, 'Reason', 500);
-  const { patient, doctor, scheduledAt } = await getAppointmentReferences(patientId, doctorId, input.scheduledAt);
-  const appointmentId = `APT-${randomUUID()}`;
-  const appointment = {
-    appointmentId,
-    patientId,
-    doctorId,
-    scheduledAt,
-    reason,
-    status: 'scheduled',
-    graphSync: { status: 'pending', updatedAt: new Date(), error: null },
-    createdBy: actor.id,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  };
-
+  const scheduledAt = requireMinuteAlignedAppointmentTime(input.scheduledAt);
   await ensureAdminIndexes();
+  const appointmentId = `APT-${randomUUID()}`;
+  let appointment;
+  let patient;
+  let doctor;
+  const session = getMongoClient().startSession();
   try {
-    await db.collection('appointment_slots').insertOne({ doctorId, scheduledAt, appointmentId, createdAt: new Date() });
+    await session.withTransaction(async () => {
+      const references = await getAppointmentReferences(patientId, doctorId, scheduledAt, null, null, session);
+      patient = references.patient;
+      doctor = references.doctor;
+      const { durationMinutes } = references;
+      await db.collection('appointment_slots').insertMany(
+        appointmentMinuteReservations(doctorId, scheduledAt, durationMinutes, appointmentId),
+        { session, ordered: true },
+      );
+      appointment = {
+        appointmentId,
+        patientId,
+        doctorId,
+        scheduledAt,
+        durationMinutes,
+        reason,
+        status: 'scheduled',
+        graphSync: { status: 'pending', updatedAt: new Date(), error: null },
+        createdBy: actor.id,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      const inserted = await db.collection('appointments').insertOne(appointment, { session });
+      appointment._id = inserted.insertedId;
+    });
   } catch (error) {
-    if (error?.code === 11000) throw new OperationError(409, 'This doctor already has an appointment at that time.');
-    throw error;
-  }
-  try {
-    const inserted = await db.collection('appointments').insertOne(appointment);
-    appointment._id = inserted.insertedId;
-  } catch (error) {
-    await db.collection('appointment_slots').deleteOne({ appointmentId });
-    throw error;
+    throwAppointmentConflict(error);
+  } finally {
+    await session.endSession();
   }
 
   const synced = await syncAndRecord(appointment, patient, doctor);
@@ -428,52 +592,61 @@ export async function updateAppointment(actor, id, input) {
   const doctorId = input.doctorId ? parseObjectId(input.doctorId, 'Doctor ID').toString() : appointment.doctorId;
   const requestedTime = input.scheduledAt || appointment.scheduledAt.toISOString();
   const reason = input.reason === undefined ? appointment.reason : requireText(input.reason, 'Reason', 500);
-  const { patient, doctor, scheduledAt } = await getAppointmentReferences(patientId, doctorId, requestedTime, _id);
+  const scheduledAt = requireMinuteAlignedAppointmentTime(requestedTime);
   const movedSlot = doctorId !== appointment.doctorId || scheduledAt.valueOf() !== appointment.scheduledAt.valueOf();
-
-  if (movedSlot) {
-    try {
-      await db.collection('appointment_slots').insertOne({ doctorId, scheduledAt, appointmentId: appointment.appointmentId, createdAt: new Date() });
-    } catch (error) {
-      if (error?.code === 11000) throw new OperationError(409, 'This doctor already has an appointment at that time.');
-      throw error;
-    }
-  }
-
   const updated = { ...appointment, patientId, doctorId, scheduledAt, reason, updatedAt: new Date() };
+  let patient;
+  let doctor;
+  const session = getMongoClient().startSession();
   try {
-    const result = await appointments.updateOne(
-      { _id, updatedAt: appointment.updatedAt },
-      { $set: { patientId, doctorId, scheduledAt, reason, updatedAt: updated.updatedAt, graphSync: { status: 'pending', updatedAt: new Date(), error: null } } },
-    );
-    if (!result.modifiedCount) throw new OperationError(409, 'This appointment changed during your update. Refresh and try again.');
+    await session.withTransaction(async () => {
+      const references = await getAppointmentReferences(patientId, doctorId, scheduledAt, _id, appointment.durationMinutes || null, session);
+      patient = references.patient;
+      doctor = references.doctor;
+      const durationMinutes = references.durationMinutes;
+      if (movedSlot) {
+        await db.collection('appointment_slots').deleteMany({ appointmentId: appointment.appointmentId }, { session });
+        await db.collection('appointment_slots').insertMany(
+          appointmentMinuteReservations(doctorId, scheduledAt, durationMinutes, appointment.appointmentId),
+          { session, ordered: true },
+        );
+      }
+      const result = await appointments.updateOne(
+        { _id, updatedAt: appointment.updatedAt, status: { $ne: 'cancelled' } },
+        { $set: { patientId, doctorId, scheduledAt, durationMinutes, reason, updatedAt: updated.updatedAt, graphSync: { status: 'pending', updatedAt: new Date(), error: null } } },
+        { session },
+      );
+      if (!result.modifiedCount) throw new OperationError(409, 'This appointment changed during your update. Refresh and try again.');
+      updated.durationMinutes = durationMinutes;
+    });
   } catch (error) {
-    if (movedSlot) await db.collection('appointment_slots').deleteOne({ appointmentId: appointment.appointmentId, doctorId, scheduledAt });
-    throw error;
+    throwAppointmentConflict(error);
+  } finally {
+    await session.endSession();
   }
-  if (movedSlot) await db.collection('appointment_slots').deleteOne({ appointmentId: appointment.appointmentId, doctorId: appointment.doctorId, scheduledAt: appointment.scheduledAt });
 
   const synced = await syncAndRecord(updated, patient, doctor);
   await audit(actor, 'appointment.updated', 'appointment', appointment.appointmentId, { graphSync: synced ? 'synced' : 'failed' });
   return { appointment: updated, graphSync: synced ? 'synced' : 'failed' };
 }
 
-export async function changeAppointmentStatus(actor, id, status) {
+export async function changeAppointmentStatus(actor, id, status, { patientId } = {}) {
   if (!appointmentStatuses.has(status)) throw new OperationError(400, 'Appointment status is invalid.');
   const db = getMongoDatabase();
   const _id = parseObjectId(id, 'Appointment ID');
-  const appointment = await db.collection('appointments').findOne({ _id });
+  const appointmentFilter = { _id, ...(patientId ? { patientId } : {}) };
+  const appointment = await db.collection('appointments').findOne(appointmentFilter);
   if (!appointment) throw new OperationError(404, 'Appointment was not found.');
   if (appointment.status !== 'scheduled' && appointment.status !== status) {
     throw new OperationError(409, 'Completed or cancelled appointments cannot be reopened.');
   }
 
   const result = await db.collection('appointments').updateOne(
-    { _id, updatedAt: appointment.updatedAt },
+    { ...appointmentFilter, updatedAt: appointment.updatedAt },
     { $set: { status, updatedAt: new Date(), graphSync: { status: 'pending', updatedAt: new Date(), error: null } } },
   );
   if (!result.modifiedCount) throw new OperationError(409, 'This appointment changed during your update. Refresh and try again.');
-  if (status === 'cancelled') await db.collection('appointment_slots').deleteOne({ appointmentId: appointment.appointmentId });
+  if (status !== 'scheduled') await db.collection('appointment_slots').deleteMany({ appointmentId: appointment.appointmentId });
   const patient = await db.collection('patients').findOne({ userId: new ObjectId(appointment.patientId) });
   const doctor = await db.collection('doctors').findOne({ userId: new ObjectId(appointment.doctorId) });
   const updated = { ...appointment, status };
@@ -543,7 +716,7 @@ export async function appointmentReport(from, to) {
     db.collection('appointments').aggregate([{ $match: { scheduledAt: { $gte: start, $lte: end } } }, { $group: { _id: '$status', count: { $sum: 1 } } }]).toArray(),
     db.collection('appointments').aggregate([{ $match: { scheduledAt: { $gte: start, $lte: end } } }, { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledAt', timezone: allowedTimeZone } }, count: { $sum: 1 } } }, { $sort: { _id: 1 } }]).toArray(),
     db.collection('appointments').aggregate([{ $match: { scheduledAt: { $gte: start, $lte: end } } }, { $group: { _id: '$doctorId', count: { $sum: 1 }, cancelled: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } } } }, { $sort: { count: -1 } }, { $limit: 50 }]).toArray(),
-    db.collection('patients').countDocuments({ createdAt: { $gte: start, $lte: end } }),
+    countLinkedProfiles('patients', 'patient', { from: start, to: end }),
   ]);
   const doctorIds = byDoctor.map((item) => item._id).filter((id) => ObjectId.isValid(id)).map((id) => new ObjectId(id));
   const doctors = doctorIds.length
