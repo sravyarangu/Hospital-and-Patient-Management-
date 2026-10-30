@@ -4,7 +4,7 @@ A React + Vite patient portal with a Node.js/Express API, MongoDB-backed patient
 
 ## Configure and run locally
 
-Requirements: Node.js 18+ and npm. Configure `backend/.env` from `backend/.env.example` with valid MongoDB, Neo4j, and random JWT/session secrets. Keep `.env` files private; do not commit them.
+Requirements: Node.js 18+ and npm. Configure `backend/.env` from `backend/.env.example` with valid MongoDB, Neo4j, and random JWT/session secrets. Keep `.env` files private; do not commit them. The API requires MongoDB to start; if Neo4j is unreachable, it starts in degraded mode, and `/api/health/databases` reports the disconnected database. Graph-dependent operations remain unavailable until Neo4j is reachable.
 
 ```bash
 npm install

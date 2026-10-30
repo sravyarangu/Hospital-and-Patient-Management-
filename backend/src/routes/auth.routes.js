@@ -73,6 +73,7 @@ router.post('/register', async (req, res, next) => {
       name,
       email,
       role: 'patient',
+      isActive: true,
       passwordHash,
       createdAt: now,
       updatedAt: now,
@@ -84,6 +85,7 @@ router.post('/register', async (req, res, next) => {
         userId: result.insertedId,
         name,
         email,
+        isActive: true,
         createdAt: now,
         updatedAt: now,
       });

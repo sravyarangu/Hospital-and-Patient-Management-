@@ -505,9 +505,9 @@ export async function getAppointmentReferences(patientId, doctorId, scheduledAt,
   const patientUserId = new ObjectId(patientId);
   const doctorUserId = new ObjectId(doctorId);
   const [patient, doctor, patientAccount, doctorAccount] = await Promise.all([
-    db.collection('patients').findOne({ userId: patientUserId, isActive: true }, { session }),
+    db.collection('patients').findOne({ userId: patientUserId, isActive: { $ne: false } }, { session }),
     db.collection('doctors').findOne({ userId: doctorUserId, isActive: true }, { session }),
-    db.collection('users').findOne({ _id: patientUserId, role: 'patient', isActive: true }, { projection: { _id: 1 }, session }),
+    db.collection('users').findOne({ _id: patientUserId, role: 'patient', isActive: { $ne: false } }, { projection: { _id: 1 }, session }),
     db.collection('users').findOne({ _id: doctorUserId, role: 'doctor', isActive: true }, { projection: { _id: 1 }, session }),
   ]);
   if (!patient || !patientAccount) throw new OperationError(404, 'Active linked patient account was not found.');

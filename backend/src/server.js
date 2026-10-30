@@ -15,7 +15,12 @@ async function startServer() {
 
   try {
     await connectMongoDB();
-    await connectNeo4j();
+    try {
+      await connectNeo4j();
+    } catch (error) {
+      console.warn('[backend] Neo4j is unavailable. Starting with degraded functionality.');
+      console.error(error.message || 'Unknown Neo4j connection error.');
+    }
 
     const server = app.listen(env.port, () => {
       console.log(`[backend] MediCare API is listening on http://localhost:${env.port}`);
